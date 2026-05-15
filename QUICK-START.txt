@@ -1,0 +1,58 @@
+================================================================================
+  JARVIS UNIVERSAL ONBOARDING — QUICK START
+================================================================================
+
+WHAT THIS IS:
+  Setup script to configure any Windows machine for Jarvis remote access
+  Works offline (via this USB) or online (via GitHub)
+
+QUICK SETUP:
+  1. Right-click jarvis-onboard.bat
+  2. Select "Run as administrator"
+  3. Wait for "Setup Complete" message
+  4. Check C:\jarvis-setup-log.txt for details
+
+WHAT YOU NEED:
+  - Windows 10 or Windows 11 (Home or Pro)
+  - Administrator access (UAC prompt will appear)
+  - ~2 minutes
+
+WHAT GETS CREATED:
+  - Local account: jarvis / Jarvis#2026!
+  - WinRM service enabled on port 5985
+  - Firewall rules configured
+  - Ready for remote management
+
+FILES IN THIS FOLDER:
+  jarvis-onboard.ps1     - Main setup script (PowerShell)
+  jarvis-onboard.bat     - Double-click launcher (Windows batch)
+  TEST-SCRIPT.ps1        - Verification script (run after setup)
+  README.md              - Full documentation
+  DEPLOYMENT-GUIDE.md    - IT deployment guide
+  QUICK-START.txt        - This file
+
+GITHUB REPOSITORY:
+  https://github.com/Toliccs/jarvis-tools
+  
+  To run from internet (if you prefer not to use this USB):
+  
+  Open PowerShell as Administrator and paste this:
+  iex (irm 'https://raw.githubusercontent.com/Toliccs/jarvis-tools/main/jarvis-onboard.ps1')
+
+VERIFICATION:
+  After setup, check that everything worked:
+  
+  PowerShell as Administrator:
+  & .\TEST-SCRIPT.ps1 -ComputerName 192.168.1.212
+  
+  Should show: "ALL TESTS PASSED - Remote access working!"
+
+NEED HELP?
+  - Check C:\jarvis-setup-log.txt for error details
+  - See README.md for troubleshooting
+  - See DEPLOYMENT-GUIDE.md for IT reference
+
+================================================================================
+Created: 2026-05-15
+Status: Ready for deployment
+================================================================================
