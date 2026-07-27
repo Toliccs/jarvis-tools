@@ -460,6 +460,19 @@ class TrainingService:
             "writable": bool(stats.get("writable")),
             "pending_proposals": stats.get("pending_proposals", 0),
             "error": stats.get("load_error"),
+            # Push identity the last load refused to inherit. The store makes
+            # this visible three ways on purpose — a log line, the audit
+            # history, and here — because it means a session this app used to
+            # believe it owned on Garmin is now unmanaged, and the athlete may
+            # be looking at a copy nothing here will touch again. Zero for any
+            # file this schema wrote, so a non-zero count is worth showing.
+            "migration_dropped": stats.get("migration_dropped", 0),
+            "migration_notes": [
+                {k: note.get(k) for k in
+                 ("uid", "reason", "workout_id", "schedule_id",
+                  "scheduled_for", "conflict_with")}
+                for note in (stats.get("migration_notes") or [])
+            ],
         }
 
     # -- trainingpeaks (read-only ICS) ------------------------------------
@@ -874,7 +887,14 @@ class TrainingService:
                 out.setdefault(entry_date, []).append({
                     "schedule_id": schedule_id,
                     "workout_id": workout_id,
-                    "title": entry.get("workoutName") or entry.get("title"),
+                    # Marker stripped. Every workout this app writes carries
+                    # `[ts:xxxxxxxx]` in its Garmin name so a later push can
+                    # prove the copy is its own; that is bookkeeping, and this
+                    # value goes straight onto the athlete's calendar. The
+                    # writer owns the stripping, so ownership and display
+                    # can't drift apart — and note ownership below is proved
+                    # against the store, never against the stripped name.
+                    "title": module.display_title(entry),
                     # Only ids in our own store are ours to unschedule; a
                     # workout the user built in Garmin Connect is read-only.
                     "owned_by_us": str(workout_id) in owned,
@@ -1076,6 +1096,20 @@ def push_record(store, uid, record=None):
     return dict((record or {}).get("garmin") or {})
 
 
+def _on_garmin(garmin):
+    """True when this app has a copy of the session on the athlete's Garmin
+    calendar — the condition that makes "Remove from Garmin" meaningful, and
+    the only thing that makes it permitted.
+
+    Either id is enough. A push that landed but never got a schedule id back
+    is still a copy on the calendar, and the writer can recover the missing id
+    from the month; treating that case as "nothing there" would strand the
+    session on the Edge with no way off.
+    """
+    garmin = garmin or {}
+    return bool(garmin.get("workout_id") or garmin.get("schedule_id"))
+
+
 def _push_state_for(garmin, effective_date):
     garmin = garmin or {}
     state = garmin.get("push_state") or "never"
@@ -1164,6 +1198,11 @@ def build_effective_workout(entry, record, availability, today,
             "pushed_at": garmin.get("pushed_at"),
             "scheduled_for": garmin.get("scheduled_for"),
             "error": redact(garmin.get("error")),
+            # "there is a copy of this on the athlete's calendar right now",
+            # which is not the same question as push_state: a "failed" or
+            # "drifted" session is still sitting on the Edge, and a "never"
+            # one never was. This is what the UI offers removal on.
+            "on_garmin": _on_garmin(garmin),
         },
         "override": override_block,
         "rev": int((record or {}).get("rev") or 0),
@@ -1999,8 +2038,18 @@ def _restore_push_state(store, uid, before):
     repaired record reads as pushed at the moment of the rollback rather than
     the moment of the push. `pushed_at` is passed through here already, and
     the moment the store accepts it the residue goes with it.
+
+    "never" counts as *no* push record, not as a state to restore. Every
+    override the store hands out now carries a `garmin` projection, and for a
+    workout that was never sent that projection is a blank one whose
+    `push_state` is "never" — truthy, and enough to get past a bare "is there
+    anything here?" test. Restoring it called `record_push`, which wrote a
+    real push entry and a ('push', uid) line in the audit log for a workout
+    this app has never sent anywhere. Nothing reached the calendar, but the
+    athlete's history claimed a push that did not happen.
     """
-    if not before or not before.get("push_state"):
+    if not before or not before.get("push_state") \
+            or before.get("push_state") == "never":
         return
     try:
         after = store.get_push(uid) or {}
@@ -2152,7 +2201,18 @@ def _not_approved_item(workout):
             "reason": "Not approved for push — tick “Approve for push” on the "
                       "session first.",
             "state": "skipped", "garmin_workout_id": None,
-            "garmin_schedule_id": None, "error": None, "structured": False}
+            "garmin_schedule_id": None, "error": None, "structured": False,
+            "on_garmin": _on_garmin(workout.get("garmin"))}
+
+
+# Said on a push row for a session the athlete has taken off his week while a
+# copy of it is still sitting on his Garmin calendar. Skipping is a local
+# decision and never unschedules anything by itself — so the row has to name
+# the copy and point at the one thing that removes it, rather than reporting
+# "skipped" and leaving the session on the Edge.
+STILL_ON_GARMIN = ("Marked skipped — but this app's copy is still on your "
+                   "Garmin calendar. Use “Remove from Garmin” on the session "
+                   "to take it off.")
 
 
 def build_push_items(service, calendar, workouts, dry_run):
@@ -2169,20 +2229,32 @@ def build_push_items(service, calendar, workouts, dry_run):
     today = today_local().isoformat()
     items = []
     for workout in workouts:
+        garmin = calendar.push_for(workout["uid"])
+        on_garmin = _on_garmin(garmin)
         if workout["status"] == "skipped":
+            # A skip is a local decision; it never takes anything off the
+            # calendar on its own. Where a copy is still there, say so and
+            # carry its ids, so the row can offer the removal rather than
+            # ending the story at "skipped".
             items.append({"uid": workout["uid"], "date": workout["date"],
                           "title": workout["title"], "action": "skip",
-                          "reason": "Marked skipped.", "state": "skipped",
-                          "garmin_workout_id": None, "garmin_schedule_id": None,
-                          "error": None, "structured": False})
+                          "reason": (STILL_ON_GARMIN if on_garmin
+                                     else "Marked skipped."),
+                          "state": "skipped",
+                          "garmin_workout_id": garmin.get("workout_id"),
+                          "garmin_schedule_id": garmin.get("schedule_id"),
+                          "error": None, "structured": False,
+                          "on_garmin": on_garmin})
             continue
         if workout["date"] < today:
             items.append({"uid": workout["uid"], "date": workout["date"],
                           "title": workout["title"], "action": "skip",
                           "reason": "In the past — not sent to the Edge.",
-                          "state": "skipped", "garmin_workout_id": None,
-                          "garmin_schedule_id": None, "error": None,
-                          "structured": False})
+                          "state": "skipped",
+                          "garmin_workout_id": garmin.get("workout_id"),
+                          "garmin_schedule_id": garmin.get("schedule_id"),
+                          "error": None, "structured": False,
+                          "on_garmin": on_garmin})
             continue
         try:
             result = writer.push_workout(
@@ -2195,13 +2267,15 @@ def build_push_items(service, calendar, workouts, dry_run):
                 plan_snapshot=calendar.snapshot_for(workout["uid"]))
             row = result.to_dict()
             row["state"] = "skipped" if row["action"] == "noop" else "pending"
+            row["on_garmin"] = on_garmin
             items.append(row)
         except Exception as exc:
             items.append({"uid": workout["uid"], "date": workout["date"],
                           "title": workout["title"], "action": "create",
                           "reason": None, "state": "failed",
                           "garmin_workout_id": None, "garmin_schedule_id": None,
-                          "error": redact(str(exc)), "structured": False})
+                          "error": redact(str(exc)), "structured": False,
+                          "on_garmin": on_garmin})
     return items
 
 
@@ -2292,9 +2366,15 @@ def run_push_job(service, job_id):
                 description=workout["description"], store=store,
                 dry_run=False,
                 plan_snapshot=calendar.snapshot_for(workout["uid"]))
-            job["items"][index] = dict(result.to_dict(), error=(
-                {"code": "garmin_rejected", "message": redact(result.error)}
-                if result.error else None))
+            row = result.to_dict()
+            job["items"][index] = dict(
+                row,
+                on_garmin=_on_garmin({
+                    "workout_id": row.get("garmin_workout_id"),
+                    "schedule_id": row.get("garmin_schedule_id")}),
+                error=({"code": "garmin_rejected",
+                        "message": redact(result.error)}
+                       if result.error else None))
         except Exception as exc:
             name = type(exc).__name__
             auth = module is not None and isinstance(
@@ -2332,6 +2412,62 @@ def run_push_job(service, job_id):
         job["state"] = "done"
     job["finished_at"] = _utc_now()
     service.record_job(job)
+
+
+# ---------------------------------------------------------------------------
+# removal: taking a session back off the Garmin calendar
+#
+# The other half of push, and the only other thing in this app that writes to
+# the athlete's Garmin account. Until this existed, a session that reached the
+# Edge stayed there: skipping it, dropping it or reverting it changed the local
+# plan and nothing else, and the push-only record the store keeps for it was
+# exactly as permanent as the v1 tombstone it replaced.
+#
+# One synchronous call, not a job: it is one session, the athlete pressed the
+# button, and he is looking at the answer.
+# ---------------------------------------------------------------------------
+
+
+def run_unpush(service, uid):
+    """Unschedule this app's copy of `uid` and forget the push record.
+
+    `unschedule` is deliberately the whole of it. The workout template stays
+    in the athlete's Garmin library — taking a session off a calendar and
+    destroying a template are different acts, and only the first is ours to
+    make. Ownership is proved the same way a push proves it: only ids this
+    app recorded are touched, so a session the athlete built in Garmin Connect
+    is never at risk.
+
+    The env gate is re-checked here, on the write path itself, exactly as
+    `run_push_job` does. The endpoint's check is what the athlete reads; this
+    one is so no future caller can route around it.
+    """
+    if not service.garmin_writes_allowed():
+        raise ApiError("writes_disabled", WRITES_DISABLED_MESSAGE, status=403,
+                       detail={"env_var": ALLOW_GARMIN_WRITES_ENV})
+
+    module, _ = load_module("garmin_workout_writer")
+    writer = service.writer()
+    try:
+        result = writer.unpush_workout(uid, store=service.store)
+    except Exception as exc:
+        not_configured = module is not None and isinstance(
+            exc, getattr(module, "GarminNotConfigured", ()))
+        auth = module is not None and isinstance(
+            exc, getattr(module, "GarminAuthFailed", ()))
+        raise ApiError(
+            "not_configured" if not_configured else "garmin_rejected",
+            redact(str(exc)), status=503 if (not_configured or auth) else 502)
+
+    if result.state == "failed":
+        # The writer has already recorded the failure against the push record,
+        # which must survive: the copy is still on the calendar, and saying
+        # otherwise would lose the only handle left on it.
+        raise ApiError(
+            "garmin_rejected",
+            redact(result.error) or "Garmin refused to remove that session.",
+            status=502, detail={"uid": uid})
+    return result.to_dict()
 
 
 # ---------------------------------------------------------------------------
@@ -2722,6 +2858,71 @@ def create_app(demo=None):
         except Exception as exc:
             raise _translate_store_error(exc, store_module)
         return EffectiveCalendar(service).workout(uid)
+
+    @app.post("/api/workouts/{uid}/unpush")
+    def unpush_workout(uid: str):
+        """Take this app's copy of a session back off the Garmin calendar.
+
+        A Garmin *write*, and the only one besides push, so it carries the
+        same consents in the same order: this app put the session there, the
+        account is connected, this machine is allowed to write at all, and the
+        athlete asked for this session by name. Nothing calls it
+        automatically — skipping or dropping a session is *reported* as
+        leaving a copy on the calendar, never used as licence to unschedule
+        one.
+
+        The refusals come before the write, cheapest and most specific first,
+        so a session that was never ours is turned away without a single
+        Garmin call.
+        """
+        calendar = EffectiveCalendar(service)
+        workout = calendar.workout(uid)
+        if workout is None:
+            raise ApiError(
+                "unknown_uid",
+                "That workout isn't on your plan or in your saved changes.",
+                status=404)
+        if not _on_garmin(calendar.push_for(uid)):
+            raise ApiError(
+                "not_pushed",
+                "This app hasn't put that session on your Garmin calendar, so "
+                "there's nothing of ours to take off it.",
+                status=409, detail={"uid": uid})
+        if service.demo:
+            raise ApiError(
+                "not_configured",
+                "Demo mode never writes to Garmin — including removals. "
+                "Restart without --demo and add your Garmin login to remove "
+                "it for real.", status=503)
+        if not service.garmin_configured():
+            raise ApiError("not_configured", NOT_CONFIGURED_MESSAGES["garmin"],
+                           status=503)
+        if not service.garmin_writes_opted_in():
+            raise ApiError("writes_disabled", WRITES_DISABLED_MESSAGE,
+                           status=403,
+                           detail={"env_var": ALLOW_GARMIN_WRITES_ENV})
+        running = service.active_job_id()
+        if running:
+            # A push runs on its own thread and writes the same push record.
+            # Racing it is the one way to end up with a copy on the calendar
+            # and no id left to remove it by — the exact orphan this endpoint
+            # exists to prevent. Two writers, one record: serialise them.
+            raise ApiError(
+                "push_in_flight",
+                "A push is running. Wait for it to finish before removing a "
+                "session — otherwise the two could disagree about what's on "
+                "your calendar.", status=409, detail={"job_id": running})
+
+        result = run_unpush(service, uid)
+        # The month read behind `days[].garmin.scheduled` is cached for the
+        # life of the context. A session the athlete removed a second ago must
+        # not still be listed there — that is precisely the "job said success,
+        # calendar says otherwise" confusion this whole path exists to end.
+        with service._lock:
+            service._garmin_context = None
+            service._garmin_context_at = 0.0
+        return {"result": result,
+                "workout": EffectiveCalendar(service).workout(uid)}
 
     @app.delete("/api/workouts/{uid}/override")
     def delete_override(uid: str):

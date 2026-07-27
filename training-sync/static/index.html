@@ -719,6 +719,7 @@ td.wrap{white-space:normal;min-width:190px}
      POST   /api/workouts/{uid}/move           {to_date,expected_rev,allow_unavailable}
      PATCH  /api/workouts/{uid}                {push_approved,status,...}
      DELETE /api/workouts/{uid}/override
+     POST   /api/workouts/{uid}/unpush
      POST   /api/proposals                     {start,end,reason}
      POST   /api/proposals/{id}/approve        {force}
      POST   /api/proposals/{id}/reject         {reason}
@@ -733,6 +734,12 @@ td.wrap{white-space:normal;min-width:190px}
    allowed to write at all (TRAINING_SYNC_ALLOW_GARMIN_WRITES — surfaced as
    capabilities.can_write_to_garmin), and that particular session is approved
    (push_approved). A preview needs none of them and always works.
+
+   Removal (/unpush) is a Garmin write too and is gated the same way, minus
+   push_approved: it is only ever offered on a session this app actually put
+   there (garmin.on_garmin), and only ever when the athlete asks. Skipping or
+   dropping a session never removes anything by itself — it says the copy is
+   still on the calendar and offers the way off.
    ========================================================================= */
 
 const $ = (s, r) => (r || document).querySelector(s);
@@ -1459,6 +1466,15 @@ function workoutCard(w, day) {
       r.onclick = ev => { ev.stopPropagation(); openPushDrawer([w.uid]); };
       ps.appendChild(r);
     }
+    // A session he has taken off his week while a copy is still on the Edge
+    // is the one case where the way out belongs on the card, not two clicks
+    // into a menu — the badge states a problem, so it carries the fix.
+    if (push.remove) {
+      const r = el("button", "rt", "Remove");
+      r.style.textDecoration = "underline";
+      r.onclick = ev => { ev.stopPropagation(); removeFromGarmin(w); };
+      ps.appendChild(r);
+    }
     card.appendChild(ps);
   }
 
@@ -1477,6 +1493,13 @@ function pushInfo(w) {
     return { cls: "bad", text: "✕ Push failed — " + (live.error && live.error.message ? live.error.message : "Garmin rejected it"), retry: true };
   }
   const g = w.garmin || {};
+  // Said first, because it is the only state where the calendar here and the
+  // calendar on the Edge disagree: he has struck the session off his week and
+  // a copy of it is still sitting on the device. Skipping is a local decision
+  // and never unschedules anything, so the card has to say the copy is there.
+  if (g.on_garmin && w.status === "skipped") {
+    return { cls: "warn", text: "⚠ Skipped — still on your Garmin calendar", remove: true };
+  }
   if (g.push_state === "scheduled") return { cls: "good", text: "✓ On Garmin · not yet synced to Edge" };
   if (g.push_state === "drifted") return { cls: "warn", text: "⚠ Changed since it was pushed" };
   if (g.push_state === "failed") return { cls: "bad", text: "✕ Push failed", retry: true };
@@ -2183,9 +2206,61 @@ async function setStatus(uid, status) {
       method: "PATCH", body: { status: status }
     });
     await loadAll();
-    toast(status === "skipped" ? "Skipped — it won't be sent to your Edge."
-      : "Updated.");
+    if (status !== "skipped") { toast("Updated."); return; }
+    /* Skipping is a local decision and takes nothing off the device. Telling
+       him "it won't be sent to your Edge" about a session that is already
+       sitting on it is the exact confusion this app exists to end — so where
+       a copy is there, the toast says so and carries the way off. */
+    const w = findWorkout(uid);
+    const onGarmin = w && w.garmin && w.garmin.on_garmin;
+    if (onGarmin) {
+      toast("Skipped here — but it's still on your Garmin calendar.", null,
+        removeBlockedReason() ? null
+          : { label: "Remove from Garmin", fn: () => removeFromGarmin(w) });
+      return;
+    }
+    toast("Skipped — it won't be sent to your Edge.");
   } catch (e) { toast(e.message, "bad"); }
+}
+
+/* ------------------------------------------------------ removal from Garmin */
+/* The only thing in this app that takes a session OFF the athlete's calendar,
+   and it never runs on its own: skipping, dropping or reverting a session
+   changes the plan here and leaves the copy on the Edge until he asks for it
+   to go. The template stays in his Garmin library either way — this removes a
+   session from a calendar, it does not destroy anything.
+
+   Same per-machine opt-in as a push, and the server checks it again on the
+   write path, so a capability read that has gone stale here can only ever
+   cost him a clear error, never an unwanted write. */
+async function removeFromGarmin(w) {
+  try {
+    const res = await api("/api/workouts/" + encodeURIComponent(w.uid) + "/unpush",
+      { method: "POST" });
+    await loadAll();
+    const r = res.result || {};
+    toast(r.state === "skipped"
+      ? "There was nothing of ours on your Garmin calendar."
+      : "Taken off your Garmin calendar. Sync your Edge to clear it there too.");
+  } catch (e) {
+    if (e.code === "writes_disabled") {
+      // Redraw with the real capability rather than leaving an affordance
+      // that can only fail.
+      try { S.status = await api("/api/status"); } catch (ignored) { /* keep the old one */ }
+      render();
+    }
+    toast(e.message, "bad");
+  }
+}
+
+/* Why removal can't be offered right now, or null when it can. Ordered
+   most-specific first so the hint names the actual obstacle. */
+function removeBlockedReason() {
+  if (isDemo()) return "Demo mode never writes to Garmin, including removals.";
+  if (!canPush()) return "Garmin isn't connected — add your login to .env.";
+  if (!canWrite()) return writesBlockedReason()
+    || "Writing to Garmin is switched off on this machine.";
+  return null;
 }
 
 /* --------------------------------------------------------------- card menu */
@@ -2232,14 +2307,21 @@ function openCardMenu(w, anchor) {
   }
   pop.appendChild(days);
 
-  item(w.status === "skipped" ? "Un-skip" : "Skip this session", async () => {
-    try {
-      await api("/api/workouts/" + encodeURIComponent(w.uid), {
-        method: "PATCH", body: { status: w.status === "skipped" ? null : "skipped" }
-      });
-      await loadAll();
-    } catch (e) { toast(e.message, "bad"); }
-  });
+  // Routed through setStatus so both skip paths answer the same way — and so
+  // skipping a session that is already on the Edge says so here too.
+  item(w.status === "skipped" ? "Un-skip" : "Skip this session",
+    () => setStatus(w.uid, w.status === "skipped" ? null : "skipped"));
+
+  // Offered only where this app actually put a copy. A workout he built in
+  // Garmin Connect himself is not ours to unschedule, and the server refuses
+  // it — the menu must not pretend otherwise.
+  if (w.garmin && w.garmin.on_garmin) {
+    const blocked = removeBlockedReason();
+    const rm = item("Remove from Garmin", () => removeFromGarmin(w),
+      blocked || "Unschedules this app's copy. The workout itself stays in "
+      + "your Garmin library, and nothing on your plan here changes.");
+    if (blocked) { rm.disabled = true; rm.setAttribute("aria-disabled", "true"); }
+  }
 
   if (w.override) {
     item("Revert to the coach's plan", async () => {
@@ -2427,6 +2509,19 @@ function pushDrawer() {
       // The honesty component: the ICS has no structured steps, so most
       // sessions land as a timed placeholder. Say so BEFORE it reaches the bike.
       if (it.reason) row.appendChild(el("div", "pushrow-r", it.reason));
+      // A row that reports a copy still on the calendar has to be actionable
+      // from here. Sending is not what clears it — removal is.
+      if (it.on_garmin && it.action === "skip") {
+        const rmw = findWorkout(it.uid);
+        const blocked = removeBlockedReason();
+        const rm = el("button", "btn sm", "Remove from Garmin");
+        rm.style.marginTop = "6px";
+        rm.title = blocked || "Unschedules this app's copy. The workout stays "
+          + "in your Garmin library.";
+        rm.disabled = !!blocked || !rmw;
+        rm.onclick = () => removeFromGarmin(rmw || { uid: it.uid });
+        row.appendChild(rm);
+      }
       if (it.error) {
         const e = el("div", "pushrow-r");
         e.style.color = "var(--status-critical)";

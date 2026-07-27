@@ -14,8 +14,15 @@ Two things about the underlying `garminconnect` API drive the design:
 - `get_scheduled_workouts(year, month)` is month-keyed, so looking up an
   existing schedule means fanning out over the months a range spans.
 
-Two rules govern everything this module writes:
+Three rules govern everything this module writes:
 
+- No decision to skip or to leave a copy alone rests on a remembered read of
+  the Garmin calendar. Month reads are cached (see `SCHEDULE_CACHE_TTL`)
+  because a calendar render asks for the same month repeatedly, but every
+  point where a *write* is decided reads fresh. The writer outlives the
+  request that built it, the athlete edits their calendar in Garmin Connect,
+  and a cache trusted a minute too long once reported a session pushed that
+  was on nobody's calendar at all.
 - It never destroys anything. There is no `delete` here at all: rewriting a
   session uploads a new template and unschedules the old calendar entry,
   leaving the superseded template in the athlete's Garmin library where it
@@ -41,6 +48,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
+from time import monotonic as _monotonic
 
 from dotenv import load_dotenv
 
@@ -176,6 +184,23 @@ def strip_marker(name):
     return MARKER_RE.sub("", str(name or "")).strip() or None
 
 
+def display_title(entry):
+    """The marker-free title of a calendar row, ready to show a person.
+
+    Takes either a raw name or a calendar row as Garmin returned it, so a
+    caller rendering the Garmin calendar has one thing to call and no reason
+    to reach for the raw name. This is the *only* form a title read back off
+    Garmin should reach a screen in: the marker is ours, not the athlete's,
+    and it used to travel all the way to the UI as `... [ts:1a2b3c4d]`.
+
+    Ownership checks want `owns_workout` on the raw name instead — stripping
+    the marker is exactly what destroys the evidence they run on.
+    """
+    if isinstance(entry, dict):
+        entry = _extract_name(entry)
+    return strip_marker(entry)
+
+
 class GarminWriterError(Exception):
     """Base class for writer errors."""
 
@@ -196,6 +221,20 @@ class GarminRejected(GarminWriterError):
     """Garmin accepted the request but refused the content."""
 
     code = "garmin_rejected"
+
+
+class GarminConflict(GarminWriterError):
+    """A write was refused because doing it would leave two copies.
+
+    Raised when a previous copy of a workout is on the Garmin calendar and
+    this app cannot address it — Garmin answered the schedule call without an
+    id and does not expose one in the listing either. Uploading the new
+    version anyway would put a second session on the athlete's Edge with
+    nothing here able to remove the first, so the push stops instead and says
+    what to do about it. The message is shown to the athlete verbatim.
+    """
+
+    code = "garmin_conflict"
 
 
 def is_configured():
@@ -570,7 +609,62 @@ def _extract_name(entry):
     return None
 
 
+def _normalize_row(node, node_date):
+    """One calendar row in the only shape the rest of this module reads.
+
+    `title` is the athlete's — marker stripped, safe to display anywhere.
+    `raw_title` is Garmin's, marker intact, and is what ownership is proved
+    against; the two are kept apart so no caller has to remember which one it
+    is holding.
+    """
+    raw = _extract_name(node)
+    return {
+        "date": node_date,
+        "workout_id": _first_id(node, _WORKOUT_ID_KEYS),
+        "schedule_id": _first_id(node, _SCHEDULE_ID_KEYS),
+        "title": strip_marker(raw),
+        "raw_title": raw,
+        "marked": bool(raw and MARKER_RE.search(raw)),
+    }
+
+
+def _rows_from(response, date=None):
+    """Every session in a calendar response, normalized, newest shape or old.
+
+    Envelope nodes — a day holding its sessions, a wrapper holding the list —
+    carry no ids of their own and are dropped; what is left is one dict per
+    session, with its own ids and its own name.
+    """
+    rows = []
+    for node, node_date in _iter_dated_rows(response):
+        if not node_date or (date and node_date != date):
+            continue
+        row = _normalize_row(node, node_date)
+        if not (row["workout_id"] or row["schedule_id"]):
+            continue
+        rows.append(row)
+    return rows
+
+
 # --- the writer -------------------------------------------------------------
+
+# Appended to a push's `reason` when this app wrote a copy but cannot say
+# whether an earlier one is still on the calendar — no date on the push record,
+# so there is no month to read. The push still goes through; it just doesn't
+# pretend to know. Silence here is what left athletes with two sessions on the
+# Edge and a job that reported success.
+UNVERIFIED_PREVIOUS_COPY = (
+    " (couldn't check whether the copy pushed earlier is still on your "
+    "calendar — if you see two, remove the older one in Garmin Connect)"
+)
+
+# How long a month read may be reused. A calendar render asks for the same
+# month once per fanned-out request and the writer is built once per process,
+# so some caching is worth having — but the athlete also edits their calendar
+# in Garmin Connect, where nothing invalidates anything here. Short enough
+# that a stale read is a stale *render*, never a stale write decision: every
+# write path passes refresh=True regardless.
+SCHEDULE_CACHE_TTL = 20.0
 
 
 class GarminWorkoutWriter:
@@ -582,12 +676,16 @@ class GarminWorkoutWriter:
     lazily on first write.
     """
 
-    def __init__(self, client=None, store=None, ftp=None):
+    def __init__(self, client=None, store=None, ftp=None, cache_ttl=None):
         self._client = client
         self._api = None
         self.store = store
         self.ftp = ftp or _env_ftp()
+        # month key -> (read_at, response). Timestamped, not just stored: this
+        # object is long-lived and the calendar it describes is not ours alone.
         self._schedule_cache = {}
+        self.cache_ttl = (SCHEDULE_CACHE_TTL if cache_ttl is None
+                          else float(cache_ttl))
 
     # -- connection --
 
@@ -693,21 +791,60 @@ class GarminWorkoutWriter:
 
     def scheduled_in_month(self, year, month, refresh=False):
         """`get_scheduled_workouts` is month-keyed, so this is the unit of
-        lookup. Cached per writer instance for the life of a request."""
+        lookup.
+
+        The response is cached for `cache_ttl` seconds — long enough to spare
+        a calendar render one read per month it spans, short enough that no
+        answer here is old news. `refresh=True` bypasses the cache entirely
+        and is mandatory anywhere the answer decides a write: this writer is
+        built once per process and lives across requests, so "we read this
+        month earlier" is not evidence about what is on the calendar now.
+        """
         api = self._ensure_api()
         key = f"{int(year):04d}-{int(month):02d}"
-        if refresh:
-            self._schedule_cache.pop(key, None)
-        if key in self._schedule_cache:
-            return self._schedule_cache[key]
+        if not refresh:
+            cached = self._schedule_cache.get(key)
+            if cached and (_monotonic() - cached[0]) < self.cache_ttl:
+                return cached[1]
+        self._schedule_cache.pop(key, None)
         try:
             response = api.get_scheduled_workouts(year, month)
         except Exception as exc:
             raise GarminWriterError(
                 f"could not read the Garmin calendar for {key}: {exc}"
             ) from exc
-        self._schedule_cache[key] = response
+        self._schedule_cache[key] = (_monotonic(), response)
         return response
+
+    def invalidate_schedule_cache(self):
+        """Forget every cached month read.
+
+        For the layer above: anything that means "your picture of Garmin is
+        stale" — the athlete pressing Refresh, a reconnect, a write made
+        outside this writer — should call this. Writes made *through* this
+        writer already invalidate what they touch.
+        """
+        self._schedule_cache.clear()
+
+    def scheduled_rows(self, year, month, refresh=False, date=None):
+        """Every workout on the Garmin calendar that month, normalized.
+
+        One dict per session — `date`, `workout_id`, `schedule_id`, `title`
+        (marker stripped, safe to display), `raw_title` (marker intact, for
+        ownership) and `marked` (whether this app wrote it, for some uid).
+
+        The ids come off the same row as the name, which is the whole point:
+        reading "the first id anywhere below the date" pairs one session's id
+        with another session's name on any day holding two.
+
+        A calendar that cannot be read is an empty list, not an exception —
+        every caller here treats "nothing found" as "create beside it".
+        """
+        try:
+            response = self.scheduled_in_month(year, month, refresh=refresh)
+        except GarminWriterError:
+            return []
+        return _rows_from(response, date=date)
 
     def find_schedule_id(self, workout_id, date, refresh=False):
         """Find the schedule id for a workout already on the calendar.
@@ -716,28 +853,16 @@ class GarminWorkoutWriter:
         without it a re-push would stack a second copy on the same day.
         """
         _validate_date(date)
-        year, month = int(date[:4]), int(date[5:7])
-        try:
-            response = self.scheduled_in_month(year, month, refresh=refresh)
-        except GarminWriterError:
-            return None
-
         target = _coerce_id(workout_id)
-        for node, node_date in _iter_dated_rows(response):
-            if node_date != date:
+        for row in self.scheduled_rows(int(date[:4]), int(date[5:7]),
+                                       refresh=refresh, date=date):
+            if not row["workout_id"] or row["workout_id"] != target:
                 continue
-            # Both ids come off the same row. A row is one session; taking
-            # them from wherever they happen to appear below the date mixes
-            # two sessions' identities on any day that holds more than one.
-            entry_workout = _first_id(node, _WORKOUT_ID_KEYS)
-            if not entry_workout or entry_workout != target:
-                continue
-            schedule_id = _first_id(node, _SCHEDULE_ID_KEYS)
-            if schedule_id:
-                return schedule_id
+            if row["schedule_id"]:
+                return row["schedule_id"]
         return None
 
-    def find_owned_scheduled(self, uid, date, refresh=False):
+    def find_owned_scheduled(self, uid, date, refresh=True):
         """Find the workout on `date` that *this app* scheduled for `uid`.
 
         Returns `(workout_id, schedule_id)`, either of which may be None.
@@ -753,24 +878,79 @@ class GarminWorkoutWriter:
         workout, which is the recoverable outcome.
 
         A calendar read that fails is not an error here; the caller creates.
+
+        `refresh` defaults to True and callers deciding a write must leave it
+        that way. This answer is the sole guard against a duplicate, and once
+        it was allowed to come from a cached month it started reporting
+        workouts the athlete had since deleted in Garmin Connect as "already
+        there" — a push that reported success and reached no device at all.
+        """
+        rows = self.owned_scheduled_rows(uid, date, refresh=refresh)
+        if not rows:
+            return (None, None)
+        return (rows[0]["workout_id"], rows[0]["schedule_id"])
+
+    def owned_scheduled_rows(self, uid, date, refresh=True):
+        """Every row on `date` this app can prove it wrote for `uid`.
+
+        More than one is possible and is exactly the state worth seeing: it is
+        the duplicate on the athlete's Edge that this module exists to avoid.
+        """
+        _validate_date(date)
+        return [
+            row for row in self.scheduled_rows(
+                int(date[:4]), int(date[5:7]), refresh=refresh, date=date)
+            if row["workout_id"] and owns_workout(row["raw_title"], uid)
+        ]
+
+    def locate_previous_copy(self, uid, workout_id, date):
+        """Where a copy this app put on `date` stands now.
+
+        Returns `(schedule_id, status)`, one of:
+
+        - `(id, "resolved")`   — the copy is there and can be unscheduled.
+        - `(None, "absent")`   — the calendar was read and holds no copy of
+                                 ours that day; nothing to clean up.
+        - `(None, "blocked")`  — a copy of ours is on that day (or the
+                                 calendar could not be read at all, which is
+                                 not the same as knowing it is empty) and no
+                                 schedule id can be had for it. Writing again
+                                 from here leaves two copies on the athlete's
+                                 Edge with no way for this app to remove
+                                 either one.
+
+        Call it *before* writing the replacement. Afterwards the new copy is
+        on the calendar carrying the same marker, and telling the two apart
+        costs an exclusion the caller can get wrong — with an unscheduled new
+        copy, i.e. a silently missing session, as the price.
+
+        It matches on the recorded workout id *and* on the ownership marker,
+        because the case this exists for is the one where Garmin never gave us
+        a schedule id — the marker is then the only handle left. Never on the
+        name: a name proves nothing and matching one is how this app once came
+        to overwrite workouts that were not its own.
         """
         _validate_date(date)
         year, month = int(date[:4]), int(date[5:7])
         try:
-            response = self.scheduled_in_month(year, month, refresh=refresh)
+            # Fresh, always: this decides whether a write happens. A read that
+            # fails is not an empty calendar, and the two must not collapse
+            # into the same answer — hence the exception, not `scheduled_rows`.
+            response = self.scheduled_in_month(year, month, refresh=True)
         except GarminWriterError:
-            return (None, None)
+            return (None, "blocked")
 
-        for node, node_date in _iter_dated_rows(response):
-            if node_date != date:
-                continue
-            if not owns_workout(_extract_name(node), uid):
-                continue
-            workout_id = _first_id(node, _WORKOUT_ID_KEYS)
-            if not workout_id:
-                continue
-            return (workout_id, _first_id(node, _SCHEDULE_ID_KEYS))
-        return (None, None)
+        target = _coerce_id(workout_id)
+        leftovers = []
+        for row in _rows_from(response, date=date):
+            if (target and row["workout_id"] == target) or \
+                    owns_workout(row["raw_title"], uid):
+                leftovers.append(row)
+
+        for row in leftovers:
+            if row["schedule_id"]:
+                return (row["schedule_id"], "resolved")
+        return (None, "blocked" if leftovers else "absent")
 
     # -- the idempotent push --
 
@@ -874,8 +1054,14 @@ class GarminWorkoutWriter:
                     # Recovering an id the store does not have: read the
                     # calendar fresh rather than trust a cached month, which
                     # may itself predate whatever lost the id.
-                    schedule_id = self.find_schedule_id(old_workout_id,
-                                                        old_date, refresh=True)
+                    schedule_id, status = self.locate_previous_copy(
+                        uid, old_workout_id, old_date)
+                    if status == "blocked":
+                        # The copy is on the old day and cannot be taken off.
+                        # Scheduling the template on the new day as well is
+                        # how one session becomes two, so don't.
+                        raise GarminConflict(_conflict_message(
+                            title, old_date, "moving it to " + date))
                 if schedule_id:
                     self.unschedule(schedule_id)
                     if store:
@@ -890,18 +1076,31 @@ class GarminWorkoutWriter:
                 new_schedule_id = self.schedule(old_workout_id, date)
                 result.workout_id = old_workout_id
                 result.schedule_id = new_schedule_id
+                if not schedule_id and not old_date:
+                    result.reason += UNVERIFIED_PREVIOUS_COPY
 
             elif result.action == "update":
+                # Where the superseded copy stands is settled *before*
+                # anything is written. The write order below is unchanged —
+                # the new copy is scheduled first and the old one removed
+                # after, so a mid-sequence failure leaves a visible duplicate
+                # rather than an invisible missing session — but if the old
+                # copy is on the calendar and cannot be removed at all, the
+                # only outcome that isn't two copies is not writing.
+                stale_schedule = old_schedule_id
+                stale_status = "resolved" if stale_schedule else "unknown"
+                if not stale_schedule and old_date:
+                    stale_schedule, stale_status = self.locate_previous_copy(
+                        uid, old_workout_id, old_date)
+                if stale_status == "blocked":
+                    raise GarminConflict(_conflict_message(
+                        title, old_date, "sending the new version"))
+
                 new_workout_id = self.upload(payload)
                 new_schedule_id = self.schedule(new_workout_id, date)
                 result.workout_id = new_workout_id
                 result.schedule_id = new_schedule_id
                 # Only now remove the superseded copy.
-                stale_schedule = old_schedule_id
-                if not stale_schedule and old_date:
-                    stale_schedule = self.find_schedule_id(old_workout_id,
-                                                           old_date,
-                                                           refresh=True)
                 if stale_schedule:
                     try:
                         self.unschedule(stale_schedule)
@@ -910,6 +1109,12 @@ class GarminWorkoutWriter:
                             " (the previous copy is still on your calendar — "
                             "remove it in Garmin Connect)"
                         )
+                elif stale_status == "unknown":
+                    # No date on the push record, so there is no month to read
+                    # and nothing can be proved either way. Proceeding is
+                    # fine; proceeding in silence is what left people with two
+                    # sessions on the Edge and a job that said "done".
+                    result.reason += UNVERIFIED_PREVIOUS_COPY
                 # The superseded template stays in the Garmin library. It is
                 # off the calendar and off the Edge, so it costs nothing; a
                 # delete here once destroyed a workout the athlete had built
@@ -924,8 +1129,13 @@ class GarminWorkoutWriter:
                 #
                 # Proof of authorship is required. An unmarked workout on the
                 # day is somebody else's and we create beside it.
+                # refresh=True is not optional here. This read is the only
+                # thing standing between a push and a duplicate, and a cached
+                # month has already reported a copy that the athlete had
+                # deleted in Garmin Connect — nothing reached the device and
+                # the job said "done".
                 adopted_id, adopted_schedule_id = self.find_owned_scheduled(
-                    uid, date)
+                    uid, date, refresh=True)
                 if adopted_id:
                     result.action = "noop"
                     result.workout_id = adopted_id
@@ -966,6 +1176,17 @@ class GarminWorkoutWriter:
             # the UI shows a single "reconnect Garmin" banner instead of the
             # same error repeated on eight rows.
             raise
+        except GarminConflict as exc:
+            # A refusal, not a breakage: nothing was written, and the athlete
+            # can clear it themselves. It goes in `reason` as well as `error`
+            # because `reason` is what the UI shows verbatim, and the previous
+            # reason ("replacing it on ...") describes a push that did not
+            # happen.
+            result.state = "failed"
+            result.error = str(exc)
+            result.reason = str(exc)
+            if store:
+                store.mark_push_failed(uid, exc)
         except GarminWriterError as exc:
             result.state = "failed"
             result.error = str(exc)
@@ -995,8 +1216,42 @@ class GarminWorkoutWriter:
             return result
 
         try:
-            if not schedule_id and date:
-                schedule_id = self.find_schedule_id(workout_id, date)
+            if not schedule_id:
+                # A write decision, so a fresh read: unscheduling an id that a
+                # cached month still lists is a failure the athlete cannot act
+                # on.
+                #
+                # `locate_previous_copy`, not `find_schedule_id`: only the
+                # former keeps "the calendar was read and holds no copy of
+                # ours" apart from "the calendar could not be read at all".
+                # Collapsing those two is what makes this path destructive.
+                # Success here clears the push record, so a failed read that
+                # answered "nothing there" would forget the only ids able to
+                # remove the copy — leaving it on the athlete's calendar
+                # permanently while this app reported it gone. That is the
+                # exact orphan this endpoint exists to prevent, so a read we
+                # cannot trust has to fail loudly and keep the ids.
+                if date:
+                    schedule_id, status = self.locate_previous_copy(
+                        uid, workout_id, date)
+                else:
+                    # No date to read a month by, so nothing can be proved
+                    # about a workout id we still hold. Same rule: refuse
+                    # rather than forget.
+                    status = "blocked"
+                if status == "blocked":
+                    result.state = "failed"
+                    result.workout_id = workout_id
+                    result.error = (
+                        "Couldn't confirm what's on your Garmin calendar"
+                        + (f" for {date}" if date else "")
+                        + ", so nothing was removed. If the session is still "
+                          "there this app still knows how to take it off — "
+                          "try again in a moment.")
+                    result.reason = result.error
+                    if store:
+                        store.mark_push_failed(uid, result.error)
+                    return result
             if schedule_id:
                 self.unschedule(schedule_id)
             result.state = "done"
@@ -1035,6 +1290,25 @@ class GarminWorkoutWriter:
                     action="create", state="failed", error=str(exc),
                     dry_run=dry_run))
         return results
+
+
+def _conflict_message(title, date, doing):
+    """What the athlete is told when a push is refused to avoid a duplicate.
+
+    Shown verbatim, so it names the day, says what this app could not do and
+    what they can do instead. `strip_marker` because a title can arrive here
+    already carrying our tag, and the tag is not theirs to read.
+    """
+    clean = strip_marker(title) or "That workout"
+    return (
+        f'Not sent: the copy of "{clean}" pushed earlier is still on your '
+        f"Garmin calendar for {date or 'an earlier day'}, and Garmin will not "
+        "say which calendar entry it is, so this app cannot take it off. "
+        f"{doing[:1].upper()}{doing[1:]} now would leave two copies on your "
+        "Edge. "
+        f"Remove the older \"{clean}\" from {date or 'that day'} in Garmin "
+        "Connect, then push again."
+    )
 
 
 def _count_steps(steps):

@@ -24,6 +24,14 @@ Design rules that the rest of the app depends on:
   did left a duplicate on the Edge 520 that nothing here could remove. The
   two maps are written by two disjoint sets of methods and no user-edit
   method touches the push map at all.
+- A stored id is only ever a *claim on somebody's calendar*, so it has to be
+  earned. Every id written under this schema was proved ours at push time by
+  the ownership marker the writer puts in the workout name. Ids inherited
+  from an older file were not: the schema they came from adopted a Garmin
+  workout on a title match, so one of them can be the athlete's own session.
+  `_migrate` therefore validates identity on the way in and drops what it
+  cannot vouch for — see its docstring for the two rules and why forgetting
+  is the safe direction.
 - Writes are atomic: serialize to a temp file in the same directory, fsync,
   then os.replace(). A crash mid-write can never leave a torn state file.
 - Every mutation appends to an audit log so the last change per workout can
@@ -37,12 +45,15 @@ TrainingPeaks — it is a local JSON file and its accessors.
 import copy
 import hashlib
 import json
+import logging
 import os
 import re
 import tempfile
 import threading
 import uuid
 from datetime import datetime, timezone
+
+_LOG = logging.getLogger(__name__)
 
 DEFAULT_STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                   ".plan_state.json")
@@ -131,6 +142,12 @@ class PushIdentityConflict(PlanStoreError):
     believed they owned it, unscheduling one would silently remove the other
     from the athlete's day. Unreachable by construction now that adoption is
     ownership-proven — this is the tripwire that keeps it that way.
+
+    It guards the *write* path only, which is not the whole way in: a state
+    file written by an older schema arrives with its ids already set, having
+    never passed through `record_push`. `_migrate` applies the same rule on
+    load, so the invariant holds over everything in the map rather than only
+    over what this schema put there.
     """
 
     code = "push_identity_conflict"
@@ -230,17 +247,114 @@ def _override_only(record):
     return out
 
 
-def _migrate(data):
-    """Carry a v1 state file forward: lift `garmin` out of every override.
+def _schema_version_of(data):
+    """The version a file claims. An unversioned file is treated as the
+    oldest one, because that is the assumption that validates more."""
+    try:
+        return int(data.get("schema_version"))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _disown(push, uid, reason, notes, **extra):
+    """Drop a push record the store cannot vouch for, and say so.
+
+    Dropping means the app forgets it ever pushed that uid. The next push
+    creates its own copy, marked and provably ours. That is the recoverable
+    direction: at worst the athlete sees a duplicate and deletes it, whereas
+    keeping an id we cannot vouch for means silently unscheduling a session
+    somebody else put on the calendar.
+    """
+    entry = push.pop(uid, None) or {}
+    note = {
+        "uid": uid,
+        "reason": reason,
+        "workout_id": entry.get("workout_id"),
+        "schedule_id": entry.get("schedule_id"),
+        "push_state": entry.get("push_state"),
+        "scheduled_for": entry.get("scheduled_for"),
+        "entry": copy.deepcopy(entry),
+    }
+    note.update(extra)
+    notes.append(note)
+    return note
+
+
+def _validate_push_identity(push, legacy_file, notes):
+    """Refuse to inherit a Garmin id this schema cannot stand behind.
+
+    Two rules, in this order:
+
+    1. (Older files only.) An entry that holds an id but no `pushed_hash` was
+       never sent by any process that could see what it was sending — that is
+       exactly the shape the previous schema's adopt-on-a-title-match left
+       behind, and the workout underneath it may be one the athlete built by
+       hand. It is dropped. The order matters: running this first means an
+       unproven claim on a proven record's ids costs only the unproven one.
+
+       Under this schema `pushed_hash is None` is a legitimate state — the
+       writer sets it after adopting a workout it proved is ours by the
+       marker, so that the next push rewrites content it could not read
+       rather than trusting it. Those records are kept.
+
+    2. (Every file.) No id may be owned twice. A schedule id is one row on
+       the athlete's calendar; two uids claiming it means unscheduling either
+       silently removes the other. `record_push` has refused this since the
+       ids were split out, but nothing enforced it on the way in, so a file
+       written by an older schema could carry the state straight past the
+       tripwire. Every uid in a colliding set is disowned: which of them (if
+       either) really owns the row is not knowable from here, and guessing
+       wrong is the destructive outcome.
+    """
+    if legacy_file:
+        for uid, entry in list(push.items()):
+            # Any empty hash, not just None: a real one is a digest of the
+            # payload that was sent, so a blank is the same absence of proof.
+            if _holds_a_copy(entry) and not entry.get("pushed_hash"):
+                _disown(push, uid, "unproven_inherited_id", notes)
+
+    claims = {}
+    for uid, entry in push.items():
+        for field in ("workout_id", "schedule_id"):
+            value = entry.get(field)
+            if value is not None:
+                claims.setdefault((field, value), []).append(uid)
+
+    conflicts = {}
+    for uids in claims.values():
+        if len(uids) < 2:
+            continue
+        for uid in uids:
+            conflicts.setdefault(uid, set()).update(
+                other for other in uids if other != uid)
+
+    for uid in sorted(conflicts):
+        _disown(push, uid, "id_collision", notes,
+                conflict_with=sorted(conflicts[uid]))
+
+    return notes
+
+
+def _migrate(data, notes=None, legacy_file=None):
+    """Carry an older state file forward: lift `garmin` out of every override,
+    then validate the push identity it brought with it.
 
     v1 kept the push identity inside the override record and, once an
     override had been cleared, kept a bare "tombstone" record alive purely to
     hold it. Both become a plain entry in `garmin_push`; a tombstone has
     nothing else in it, so nothing of it remains in the edit layer.
 
-    Nothing is dropped that the app can still use, and history is left
-    exactly as written — it is an audit log, not state.
+    Nothing the app can still stand behind is dropped, and history is left
+    exactly as written — it is an audit log, not state. What *is* dropped is
+    push identity that fails `_validate_push_identity`: ids from a schema
+    that adopted workouts on a title match, and ids two uids both claim.
+    Every such drop is appended to `notes` so the caller can surface it;
+    a migration that drops nothing leaves `notes` empty, which is the case
+    for every legitimate record and for the shipped state file.
     """
+    notes = [] if notes is None else notes
+    if legacy_file is None:
+        legacy_file = _schema_version_of(data) < SCHEMA_VERSION
     overrides = data.get("workout_overrides")
     if not isinstance(overrides, dict):
         overrides = {}
@@ -278,6 +392,8 @@ def _migrate(data):
             continue
         entry.setdefault("uid", uid)
 
+    _validate_push_identity(push, legacy_file, notes)
+
     data["workout_overrides"] = overrides
     data["garmin_push"] = push
     return data
@@ -302,6 +418,9 @@ class PlanStore:
         self._lock = threading.RLock()
         self._state = _empty_state()
         self.load_error = None
+        # Push records the last load refused to inherit. Empty for every file
+        # this schema wrote; see `_validate_push_identity`.
+        self.migration_notes = []
         if autoload:
             self.load()
 
@@ -313,6 +432,7 @@ class PlanStore:
         overwritten — it may be recoverable by hand, and it holds the
         user's edits."""
         with self._lock:
+            self.migration_notes = []
             if not os.path.exists(self.path):
                 self._state = _empty_state()
                 return self._state
@@ -335,11 +455,44 @@ class PlanStore:
             for key in ("proposals", "rejected_signatures", "history"):
                 if not isinstance(base.get(key), list):
                     base[key] = []
-            # Migrate on the file's own shape, before stamping the version.
-            _migrate(base)
+            # Migrate on the file's own shape, before stamping the version:
+            # what the *file* claims decides which identity rules apply, and
+            # a file with no version at all is treated as the oldest one.
+            notes = []
+            _migrate(base, notes,
+                     legacy_file=_schema_version_of(data) < SCHEMA_VERSION)
             base["schema_version"] = SCHEMA_VERSION
             self._state = base
+            self.migration_notes = notes
+            self._record_migration_drops(notes)
             return self._state
+
+    def _record_migration_drops(self, notes):
+        """Make a dropped push identity visible rather than silent.
+
+        Three ways, because the athlete may notice any one of them: a log
+        line for whoever is watching the process, `migration_notes` /
+        `stats()` for the status endpoint, and a history entry so the audit
+        log the UI already renders says what happened to that workout.
+
+        The history entry is written here rather than saved immediately —
+        `load` does not write to disk — so it persists with the next save,
+        alongside a state that no longer holds the id.
+        """
+        for note in notes:
+            _LOG.warning(
+                "plan_store: not inheriting the Garmin identity for %s "
+                "(reason=%s workout_id=%s schedule_id=%s%s). This app cannot "
+                "prove it wrote that workout, so it will leave it alone; a "
+                "later push creates its own copy.",
+                note.get("uid"), note.get("reason"), note.get("workout_id"),
+                note.get("schedule_id"),
+                (" conflict_with=%s" % (note.get("conflict_with"),))
+                if note.get("conflict_with") else "",
+            )
+            self._append_history("migration_drop_push", note.get("uid"),
+                                 "migration", note.get("entry"), None,
+                                 undoable=False)
 
     def _quarantine_corrupt_file(self):
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -430,6 +583,10 @@ class PlanStore:
                 ),
                 "writable": self.writable,
                 "load_error": self.load_error,
+                # Push identity the last load refused to inherit. Zero for
+                # any file this schema wrote.
+                "migration_dropped": len(self.migration_notes),
+                "migration_notes": copy.deepcopy(self.migration_notes),
             }
 
     # ---------- history / audit ----------

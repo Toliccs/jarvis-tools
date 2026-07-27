@@ -43,6 +43,11 @@ def isolated_state(tmp_path, monkeypatch):
                         str(tmp_path / "demo_state.json"))
     monkeypatch.setattr(web_app, "PUSH_LOG_PATH", str(tmp_path / "push.json"))
     monkeypatch.setattr(web_app, "PLAN_CACHE_PATH", str(tmp_path / "plan.json"))
+    # A non-demo app opens the store at its *default* path, which is the
+    # developer's own training-sync/.plan_state.json. Point it at the tmp dir
+    # so no test can read — or write — the real plan.
+    monkeypatch.setenv("TRAINING_SYNC_STATE_PATH",
+                       str(tmp_path / "plan_state.json"))
     monkeypatch.setenv("TRAINING_TZ", "Europe/London")
     # Writing to a real Garmin account is opt-in. No test may inherit it from
     # the machine it happens to run on.
@@ -1053,3 +1058,411 @@ def test_preview_is_always_available_even_with_writes_switched_off(client):
     assert job["summary"]["created"] == 1
     assert ok(client.get("/api/status"))["capabilities"][
         "can_write_to_garmin"] is False
+
+
+# ---------------------------------------------------------------------------
+# defect 7 — a rollback must not fabricate a push that never happened
+# ---------------------------------------------------------------------------
+
+
+def test_a_failed_approval_invents_no_push_record_for_a_never_pushed_workout(
+        client, monkeypatch):
+    """`push_record` falls back to the override's projected `garmin` block,
+    and the store now attaches that projection to *every* record — a blank one
+    whose `push_state` is "never". "never" is truthy, so the rollback's
+    "nothing to restore" guard let it through and `record_push` wrote a push
+    entry, plus a ('push', uid) line in the audit log, for a workout this app
+    has never sent anywhere.
+
+    Nothing reaches the calendar, so the harm is entirely in the record: the
+    athlete's history claims a push that did not happen, and the store starts
+    reporting a Garmin block for a uid Garmin has never heard of.
+    """
+    block(client, week2(1), "work trip")
+    swap = find(propose(client, week2(0), week2(6))["proposals"], "SWAP")
+    assert swap is not None
+    victim = next(op for op in swap["operations"] if op["uid"] != swap["uid"])
+    uid = victim["uid"]
+
+    store = client.app.state.service.store
+    # The projection only exists once the athlete owns a record on the uid —
+    # ticking "approve for push" is the cheapest way to get one, and is
+    # exactly what the reproduction did.
+    approve_for_push(client, uid)
+    assert store.get_push(uid) is None, "nothing has been pushed"
+    assert store.get_override(uid)["garmin"]["push_state"] == "never", \
+        "the blank projection is what the guard has to see through"
+
+    monkeypatch.setattr(store, "approve_proposal",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    assert client.post(f"/api/proposals/{swap['proposal_id']}/approve",
+                       json={}).status_code >= 400
+
+    assert store.get_push(uid) is None, \
+        "a rollback fabricated a push record for a workout never pushed"
+    assert store.all_pushes() == {}
+    actions = [(e["action"], e["uid"])
+               for e in ok(client.get("/api/history"))["entries"]]
+    assert ("push", uid) not in actions, \
+        "the audit log claims a push that never happened"
+
+
+def test_a_rollback_still_repairs_a_push_that_really_happened(client,
+                                                              monkeypatch):
+    """The other side of the same guard: treating "never" as "no record" must
+    not stop a genuine push record being put back."""
+    block(client, week2(1), "work trip")
+    swap = find(propose(client, week2(0), week2(6))["proposals"], "SWAP")
+    victim = next(op for op in swap["operations"] if op["uid"] != swap["uid"])
+    store = client.app.state.service.store
+    pretend_pushed(store, victim["uid"], workout(client, victim["uid"])["date"])
+    before = push_identity(store, victim["uid"])
+
+    monkeypatch.setattr(store, "approve_proposal",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    assert client.post(f"/api/proposals/{swap['proposal_id']}/approve",
+                       json={}).status_code >= 400
+    assert push_identity(store, victim["uid"]) == before
+
+
+# ---------------------------------------------------------------------------
+# gap 5 / defect 8 — a fake Garmin account, so the real write path can run
+# ---------------------------------------------------------------------------
+
+
+class FakeGarminCalendar:
+    """A tiny model of the athlete's Garmin calendar, standing in for
+    `garminconnect.Garmin`.
+
+    Only the calls a removal makes are implemented — list a month, unschedule
+    a row — so nothing in these tests can reach the network even by accident.
+    An unschedule removes the row, which is what the Edge 520 would stop
+    showing after the next sync.
+    """
+
+    def __init__(self):
+        self.rows = []
+        self.calls = []
+
+    def add(self, date, workout_id, schedule_id, name):
+        self.rows.append({"date": date, "workoutId": workout_id,
+                          "workoutScheduleId": schedule_id,
+                          "workoutName": name})
+
+    def get_scheduled_workouts(self, year, month):
+        prefix = "%04d-%02d" % (int(year), int(month))
+        self.calls.append(("list", prefix))
+        return [dict(row) for row in self.rows
+                if str(row["date"]).startswith(prefix)]
+
+    def unschedule_workout(self, schedule_id):
+        self.calls.append(("unschedule", schedule_id))
+        row = next((r for r in self.rows
+                    if r["workoutScheduleId"] == schedule_id), None)
+        if row is None:
+            raise RuntimeError("no scheduled workout %s" % schedule_id)
+        self.rows.remove(row)
+        return {"ok": True}
+
+
+@pytest.fixture
+def live_client(monkeypatch):
+    """A non-demo app whose Garmin account is a `FakeGarminCalendar`.
+
+    Everything above the last hop is the real thing — the real endpoint, the
+    real `GarminWorkoutWriter`, the real store — and only the bottom-most
+    `garminconnect` calls are faked, so the write path under test is the one
+    that would run against a real account. The plan comes from the demo
+    generator because a non-demo app has no ICS feed configured and these
+    tests need workouts to act on.
+
+    Writes are still opt-in: the env gate is *not* set here, so every test
+    that wants a real removal has to say so.
+    """
+    if TestClient is None:
+        pytest.skip("the HTTP tests need httpx installed (pip install httpx)")
+    monkeypatch.setenv("GARMIN_EMAIL", "rider@example.com")
+    monkeypatch.setenv("GARMIN_PASSWORD", "not-a-real-password")
+    garmin = FakeGarminCalendar()
+    monkeypatch.setattr(
+        web_app.TrainingService, "plan",
+        lambda self, force=False: (web_app.demo_plan_entries(self), []))
+    monkeypatch.setattr(web_app.TrainingService, "garmin",
+                        lambda self, force=False: garmin)
+    with TestClient(web_app.create_app(demo=False)) as test_client:
+        test_client.garmin = garmin
+        yield test_client
+
+
+def garmin_reread(client):
+    """Forget the app's cached picture of the Garmin month.
+
+    These tests change the fake account behind the app's back, which is what
+    another device — or the athlete in Garmin Connect — does in real life; a
+    refresh is how the app finds out. Both caches are dropped: the service's
+    context and the writer's own month read.
+    """
+    service = client.app.state.service
+    service._garmin_context = None
+    service._garmin_context_at = 0.0
+    service.writer().invalidate_schedule_cache()
+
+
+def a_pushed_session(client, day=None, workout_id=4242, schedule_id=8484,
+                     name=None):
+    """A session that is on the plan, on the fake Garmin calendar, and in the
+    store's push map — the state a successful push leaves behind."""
+    day = day or week2(1)
+    uid = calendar(client, day, day)["days"][0]["workouts"][0]["uid"]
+    module, _ = web_app.load_module("garmin_workout_writer")
+    if name is None:
+        name = module.marked_workout_name(
+            workout(client, uid)["title"], uid)
+    client.garmin.add(day, workout_id, schedule_id, name)
+    pretend_pushed(client.app.state.service.store, uid, day,
+                   workout_id=workout_id, schedule_id=schedule_id)
+    garmin_reread(client)
+    return uid, day
+
+
+# ---------------------------------------------------------------------------
+# gap 5 — nothing in the app could ever take a workout off the Garmin calendar
+# ---------------------------------------------------------------------------
+
+
+def test_a_pushed_session_can_be_taken_off_the_garmin_calendar(
+        live_client, monkeypatch):
+    """`unpush_workout` and `clear_push` existed but had no caller anywhere:
+    once a session was on the Edge, nothing in the app could take it off, and
+    the push-only record the store projects for it was exactly as permanent as
+    the v1 tombstone it replaced.
+    """
+    monkeypatch.setenv(web_app.ALLOW_GARMIN_WRITES_ENV, "1")
+    uid, day = a_pushed_session(live_client)
+    assert workout(live_client, uid)["garmin"]["push_state"] == "scheduled"
+
+    body = ok(live_client.post(f"/api/workouts/{uid}/unpush"))
+
+    assert body["result"]["action"] == "unschedule"
+    assert body["result"]["state"] == "done"
+    assert live_client.garmin.rows == [], \
+        "the copy is still on the athlete's Garmin calendar"
+    assert ("unschedule", 8484) in live_client.garmin.calls
+
+    store = live_client.app.state.service.store
+    assert store.get_push(uid) is None, "the push record outlived the copy"
+    after = body["workout"]
+    assert after["garmin"]["push_state"] == "never"
+    assert after["garmin"]["workout_id"] is None
+    assert after["garmin"]["on_garmin"] is False
+    # The push-only projection is the state the design claims always has an
+    # exit. This is the exit.
+    assert after["override"] is None and after["rev"] == 0
+    assert workout(live_client, uid)["garmin"]["push_state"] == "never"
+
+
+def test_removal_recovers_a_lost_schedule_id_from_the_calendar(
+        live_client, monkeypatch):
+    """A push that never got a schedule id back still put a copy on the
+    calendar. Removal has to find it by workout id rather than give up."""
+    monkeypatch.setenv(web_app.ALLOW_GARMIN_WRITES_ENV, "1")
+    uid, day = a_pushed_session(live_client)
+    store = live_client.app.state.service.store
+    store.record_push(uid, schedule_id=None, push_state="scheduled")
+    assert store.get_push(uid)["schedule_id"] is None
+
+    body = ok(live_client.post(f"/api/workouts/{uid}/unpush"))
+    assert body["result"]["state"] == "done"
+    assert body["result"]["garmin_schedule_id"] == 8484
+    assert live_client.garmin.rows == []
+    assert store.get_push(uid) is None
+
+
+def test_the_calendar_stops_listing_a_session_the_athlete_just_removed(
+        live_client, monkeypatch):
+    """The month read behind `days[].garmin.scheduled` is cached. A removal
+    the athlete made a second ago must not still be listed there."""
+    monkeypatch.setenv(web_app.ALLOW_GARMIN_WRITES_ENV, "1")
+    uid, day = a_pushed_session(live_client)
+    assert calendar(live_client, day, day)["days"][0]["garmin"]["scheduled"]
+
+    ok(live_client.post(f"/api/workouts/{uid}/unpush"))
+    assert calendar(live_client, day, day)["days"][0]["garmin"]["scheduled"] == []
+
+
+def test_removal_is_refused_until_garmin_writes_are_opted_in(live_client):
+    """Removal is a Garmin write and sits behind the same per-machine opt-in
+    as a push. A refusal must leave the calendar untouched."""
+    uid, day = a_pushed_session(live_client)
+    refused = live_client.post(f"/api/workouts/{uid}/unpush")
+    assert refused.status_code == 403, refused.text
+    body = refused.json()["error"]
+    assert body["code"] == "writes_disabled"
+    assert web_app.ALLOW_GARMIN_WRITES_ENV in body["message"]
+    assert body["detail"]["env_var"] == web_app.ALLOW_GARMIN_WRITES_ENV
+    assert len(live_client.garmin.rows) == 1, "a refusal touched the calendar"
+    assert not [c for c in live_client.garmin.calls if c[0] == "unschedule"]
+    assert live_client.app.state.service.store.get_push(uid) is not None
+
+
+def test_the_removal_path_itself_refuses_when_garmin_writes_are_off(
+        live_client):
+    """The endpoint gate is not the only gate. `run_unpush` re-checks on the
+    write path itself, so no future caller can route around it."""
+    uid, _ = a_pushed_session(live_client)
+    service = live_client.app.state.service
+    with pytest.raises(web_app.ApiError) as caught:
+        web_app.run_unpush(service, uid)
+    assert caught.value.code == "writes_disabled"
+    assert caught.value.status == 403
+    assert not [c for c in live_client.garmin.calls if c[0] == "unschedule"]
+    assert live_client.app.state.service.store.get_push(uid) is not None
+
+
+def test_demo_mode_never_removes_anything_from_garmin(client):
+    day = week2(1)
+    uid = calendar(client, day, day)["days"][0]["workouts"][0]["uid"]
+    pretend_pushed(client.app.state.service.store, uid, day)
+    refused = client.post(f"/api/workouts/{uid}/unpush")
+    assert refused.status_code == 503, refused.text
+    assert refused.json()["error"]["code"] == "not_configured"
+    assert client.app.state.service.store.get_push(uid) is not None
+
+
+def test_removing_a_session_this_app_never_pushed_is_refused(live_client,
+                                                             monkeypatch):
+    """Marker-based ownership, restated at the endpoint: a workout the athlete
+    built in Garmin Connect is not ours to unschedule, and the only proof we
+    accept is our own push record."""
+    monkeypatch.setenv(web_app.ALLOW_GARMIN_WRITES_ENV, "1")
+    day = week2(1)
+    uid = calendar(live_client, day, day)["days"][0]["workouts"][0]["uid"]
+    # Something of the athlete's own is sitting on that day, unmarked.
+    live_client.garmin.add(day, 1111, 2222, "My own ride")
+
+    refused = live_client.post(f"/api/workouts/{uid}/unpush")
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["error"]["code"] == "not_pushed"
+    assert len(live_client.garmin.rows) == 1, "someone else's session was touched"
+    assert not [c for c in live_client.garmin.calls if c[0] == "unschedule"]
+
+
+def test_removing_a_workout_that_is_not_on_the_plan_is_a_404(live_client,
+                                                             monkeypatch):
+    monkeypatch.setenv(web_app.ALLOW_GARMIN_WRITES_ENV, "1")
+    missing = live_client.post("/api/workouts/nope@example/unpush")
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "unknown_uid"
+
+
+def test_a_skipped_session_still_on_garmin_says_so_instead_of_going_silent(
+        client):
+    """Marking a pushed session skipped used to end the story with
+    `reason: "Marked skipped."` — and the session stayed on the Edge. The
+    preview has to say the copy is still there and point at the way off."""
+    day = week2(1)
+    uid = calendar(client, day, day)["days"][0]["workouts"][0]["uid"]
+    store = client.app.state.service.store
+    pretend_pushed(store, uid, day)
+    approve_for_push(client, uid)
+    ok(client.patch(f"/api/workouts/{uid}", json={"status": "skipped"}))
+
+    job = push(client, start=week2(0), end=week2(6), dry_run=True)
+    row = next(i for i in job["items"] if i["uid"] == uid)
+    assert row["action"] == "skip" and row["state"] == "skipped"
+    assert row["on_garmin"] is True
+    assert row["reason"] != "Marked skipped.", \
+        "the copy is still on the athlete's calendar and this said nothing"
+    assert "still on your Garmin calendar" in row["reason"]
+    assert row["garmin_workout_id"] == 555
+    assert job["summary"]["skipped"] == 1
+
+
+def test_a_skipped_session_that_was_never_pushed_still_reads_plainly(client):
+    day = week2(1)
+    uid = calendar(client, day, day)["days"][0]["workouts"][0]["uid"]
+    approve_for_push(client, uid)
+    ok(client.patch(f"/api/workouts/{uid}", json={"status": "skipped"}))
+    job = push(client, start=week2(0), end=week2(6), dry_run=True)
+    row = next(i for i in job["items"] if i["uid"] == uid)
+    assert row["reason"] == "Marked skipped."
+    assert row["on_garmin"] is False
+
+
+def test_a_preview_never_removes_anything_by_itself(live_client, monkeypatch):
+    """Removal is an explicit act. Skipping a pushed session and previewing a
+    push must not quietly unschedule it — not even with writes switched on."""
+    monkeypatch.setenv(web_app.ALLOW_GARMIN_WRITES_ENV, "1")
+    uid, day = a_pushed_session(live_client)
+    approve_for_push(live_client, uid)
+    ok(live_client.patch(f"/api/workouts/{uid}", json={"status": "skipped"}))
+
+    push(live_client, start=week2(0), end=week2(6), dry_run=True)
+    assert len(live_client.garmin.rows) == 1, "a preview removed a session"
+    assert not [c for c in live_client.garmin.calls if c[0] == "unschedule"]
+    assert live_client.app.state.service.store.get_push(uid) is not None
+
+
+# ---------------------------------------------------------------------------
+# defect 8 — the ownership marker leaked into the UI
+# ---------------------------------------------------------------------------
+
+
+def test_the_ownership_marker_never_reaches_the_calendar_ui(live_client):
+    """Every workout this app writes carries `[ts:xxxxxxxx]` in its Garmin
+    name, so a later push can prove the copy is its own. It is bookkeeping,
+    and `days[].garmin.scheduled[].title` was handing it straight to the
+    athlete: "Threshold 3x12min [ts:1a2b3c4d]".
+    """
+    module, _ = web_app.load_module("garmin_workout_writer")
+    day = week2(1)
+    uid = calendar(live_client, day, day)["days"][0]["workouts"][0]["uid"]
+    title = workout(live_client, uid)["title"]
+    marked = module.marked_workout_name(title, uid)
+    assert module.MARKER_RE.search(marked), "the fixture must carry a marker"
+    live_client.garmin.add(day, 4242, 8484, marked)
+    pretend_pushed(live_client.app.state.service.store, uid, day,
+                   workout_id=4242, schedule_id=8484)
+    garmin_reread(live_client)
+
+    rows = calendar(live_client, day, day)["days"][0]["garmin"]["scheduled"]
+    assert rows, "the scheduled row must still be reported"
+    assert "[ts:" not in (rows[0]["title"] or "")
+    assert rows[0]["title"] == title
+    # Stripping the marker for display must not cost the ownership proof.
+    assert rows[0]["owned_by_us"] is True
+
+
+def test_an_unmarked_garmin_session_keeps_its_own_name_and_is_not_ours(
+        live_client):
+    day = week2(1)
+    live_client.garmin.add(day, 1111, 2222, "Club chaingang")
+    rows = calendar(live_client, day, day)["days"][0]["garmin"]["scheduled"]
+    assert rows[0]["title"] == "Club chaingang"
+    assert rows[0]["owned_by_us"] is False
+
+
+def test_removal_waits_for_a_push_in_flight(live_client, monkeypatch):
+    """A push runs on its own thread and writes the same push record. Racing
+    it is how a copy ends up on the calendar with no id left to remove it by —
+    the exact orphan this endpoint exists to prevent."""
+    monkeypatch.setenv(web_app.ALLOW_GARMIN_WRITES_ENV, "1")
+    uid, _ = a_pushed_session(live_client)
+    service = live_client.app.state.service
+    service.record_job({"job_id": "psh_busy", "state": "running",
+                        "dry_run": False, "items": [],
+                        "progress": {"done": 0, "total": 0}})
+    service._active_job = "psh_busy"
+
+    refused = live_client.post(f"/api/workouts/{uid}/unpush")
+    assert refused.status_code == 409, refused.text
+    body = refused.json()["error"]
+    assert body["code"] == "push_in_flight"
+    assert body["detail"]["job_id"] == "psh_busy"
+    assert len(live_client.garmin.rows) == 1
+    assert service.store.get_push(uid) is not None
+
+    # ...and it goes through the moment the job is done.
+    service._active_job = None
+    ok(live_client.post(f"/api/workouts/{uid}/unpush"))
+    assert live_client.garmin.rows == []
