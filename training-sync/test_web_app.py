@@ -619,6 +619,21 @@ def push(client, **body):
     return response.json()
 
 
+def run_push(client, **body):
+    """A real push, run to completion: POST it, then poll until the background
+    job reaches a terminal state, and hand back the finished job.
+
+    Bounded — a job that never finishes is a failed test, not a hung one.
+    """
+    job = push(client, dry_run=False, **body)
+    for _ in range(100):
+        job = ok(client.get(f"/api/push/{job['job_id']}"))
+        if job["state"] in ("done", "partial", "failed", "cancelled"):
+            return job
+        time.sleep(0.05)
+    raise AssertionError(f"the push job never finished: {job['state']}")
+
+
 def pretend_pushed(store, uid, date, workout_id=555, schedule_id=777):
     """Put a workout in the state a successful push leaves behind. No network:
     this is exactly what `record_push` writes when the writer comes back."""
@@ -1131,23 +1146,54 @@ def test_a_rollback_still_repairs_a_push_that_really_happened(client,
 
 
 class FakeGarminCalendar:
-    """A tiny model of the athlete's Garmin calendar, standing in for
+    """A tiny model of the athlete's Garmin account, standing in for
     `garminconnect.Garmin`.
 
-    Only the calls a removal makes are implemented — list a month, unschedule
-    a row — so nothing in these tests can reach the network even by accident.
-    An unschedule removes the row, which is what the Edge 520 would stop
-    showing after the next sync.
+    Every call the writer can make is implemented — upload a template,
+    schedule it on a day, list a month, unschedule a row — so a real push runs
+    the whole way down and still cannot reach the network. Only the two calls
+    a removal makes used to be here, and a push against it died on its first
+    write hop; the test that "proved" a full push makes no outbound call was
+    proving it about a push that never happened.
+
+    A template survives being unscheduled, exactly as it does on Garmin: the
+    row goes off the calendar — which is what the Edge 520 stops showing after
+    the next sync — and the workout stays in the library to be put back down.
     """
 
     def __init__(self):
         self.rows = []
+        self.templates = {}
         self.calls = []
+        self._next_workout_id = 9000
+        self._next_schedule_id = 7000
 
     def add(self, date, workout_id, schedule_id, name):
+        # The template is registered too: a row on the calendar always has one
+        # behind it, and a reschedule is that template put down on a new day.
+        self.templates.setdefault(workout_id, {"workoutName": name})
         self.rows.append({"date": date, "workoutId": workout_id,
                           "workoutScheduleId": schedule_id,
                           "workoutName": name})
+
+    def upload_workout(self, payload):
+        workout_id = self._next_workout_id
+        self._next_workout_id += 1
+        self.templates[workout_id] = dict(payload)
+        self.calls.append(("upload", workout_id))
+        return {"workoutId": workout_id}
+
+    def schedule_workout(self, workout_id, date):
+        self.calls.append(("schedule", (workout_id, date)))
+        template = self.templates.get(workout_id)
+        if template is None:
+            raise RuntimeError("no workout template %s" % workout_id)
+        schedule_id = self._next_schedule_id
+        self._next_schedule_id += 1
+        self.rows.append({"date": date, "workoutId": workout_id,
+                          "workoutScheduleId": schedule_id,
+                          "workoutName": template.get("workoutName")})
+        return {"workoutScheduleId": schedule_id}
 
     def get_scheduled_workouts(self, year, month):
         prefix = "%04d-%02d" % (int(year), int(month))
@@ -1782,6 +1828,204 @@ def test_an_unrecognised_calendar_status_fails_closed(live_client, monkeypatch):
     day = week2(1)
     block = calendar(live_client, day, day)["days"][0]["garmin"]
     assert block["scheduled_readable"] is False
+
+
+# ---------------------------------------------------------------------------
+# D1 — a preview's verdict is not a push
+#
+# The preview runs `push_workout(dry_run=True)`, which decides the action from
+# the stored hash and date alone: no network call, no look at the athlete's
+# calendar. That is exactly right for a preview and exactly wrong as the final
+# word. The job used to take it as final — a previewed "noop" was written into
+# the item as `state: "skipped"`, and the real run short-circuited on that
+# state before the writer was ever called.
+#
+# So the writer's noop verification — the block that re-reads the month and
+# re-sends a copy the athlete deleted in Garmin Connect — could not run on any
+# push the athlete is able to trigger. The scenario below is his most likely
+# first test of the whole app: push a session, delete it in Garmin Connect,
+# push again. It reported "noop, unchanged", made no call at all, and left the
+# card saying "✓ On Garmin" over an empty calendar.
+# ---------------------------------------------------------------------------
+
+
+def garmin_writes(client, since=0):
+    """The write hops the fake account has taken, from `since` onwards."""
+    return [call for call in client.garmin.calls[since:]
+            if call[0] in ("upload", "schedule", "unschedule")]
+
+
+def test_a_session_deleted_in_garmin_connect_is_sent_again_by_the_next_push(
+        live_client, monkeypatch):
+    """The whole defect, end to end over HTTP, on the athlete's own path.
+
+    Nothing here reaches behind the API: push, delete the copy the way Garmin
+    Connect would, push again. The second push has to put the session back —
+    there is no other way back from this, because nothing in this app removes
+    or re-adds anything on the athlete's behalf.
+    """
+    monkeypatch.setenv(web_app.ALLOW_GARMIN_WRITES_ENV, "1")
+    day = week2(1)
+    uid = calendar(live_client, day, day)["days"][0]["workouts"][0]["uid"]
+    approve_for_push(live_client, uid)
+
+    first = run_push(live_client, start=day, end=day)
+    assert first["state"] == "done" and first["summary"]["created"] == 1
+    assert len(live_client.garmin.rows) == 1
+    before = push_identity(live_client.app.state.service.store, uid)
+
+    # The athlete deletes it in Garmin Connect. The app is not told, and is
+    # not allowed to need telling: the second push must find out for itself,
+    # so no cache is dropped here.
+    live_client.garmin.rows.clear()
+
+    second = run_push(live_client, start=day, end=day)
+    assert second["state"] == "done", second
+    row = next(i for i in second["items"] if i["uid"] == uid)
+    assert row["action"] == "create", \
+        f"the push believed the stored record over the calendar: {row}"
+    assert row["state"] == "done"
+    assert "no longer on your Garmin calendar" in (row["reason"] or "")
+    assert second["summary"]["created"] == 1 and second["summary"]["noop"] == 0
+
+    assert len(live_client.garmin.rows) == 1, \
+        "the job reported success and the athlete's Edge stays empty"
+    module, _ = web_app.load_module("garmin_workout_writer")
+    assert module.owns_workout(live_client.garmin.rows[0]["workoutName"], uid)
+    after = push_identity(live_client.app.state.service.store, uid)
+    assert after["workout_id"] != before["workout_id"], \
+        "the store still points at the copy the athlete deleted"
+
+    # And the two halves of the page agree again: the card claimed "On Garmin"
+    # while the day strip — reading the calendar itself — showed nothing.
+    garmin_reread(live_client)
+    strip = calendar(live_client, day, day)["days"][0]["garmin"]
+    assert strip["scheduled_readable"] is True
+    assert [r["workout_id"] for r in strip["scheduled"]] == \
+        [row["garmin_workout_id"]]
+    assert workout(live_client, uid)["garmin"]["on_garmin"] is True
+
+
+def test_an_unchanged_session_is_confirmed_against_garmin_before_it_is_skipped(
+        live_client, monkeypatch):
+    """The other side of the same widening: when the copy really is still
+    there, the second push must look, say so in the writer's own words, and
+    write nothing.
+
+    "Unchanged since the last push." is the preview's sentence, said without
+    looking. Only the real run can say "Already on your Garmin calendar for
+    ..., unchanged" — so that sentence arriving is the proof the verification
+    ran, and no write following it is the proof idempotence survived.
+    """
+    monkeypatch.setenv(web_app.ALLOW_GARMIN_WRITES_ENV, "1")
+    day = week2(1)
+    uid = calendar(live_client, day, day)["days"][0]["workouts"][0]["uid"]
+    approve_for_push(live_client, uid)
+    assert run_push(live_client, start=day, end=day)["state"] == "done"
+
+    mark = len(live_client.garmin.calls)
+    second = run_push(live_client, start=day, end=day)
+    assert second["state"] == "done"
+    row = next(i for i in second["items"] if i["uid"] == uid)
+    assert row["action"] == "noop"
+    assert "Already on your Garmin calendar" in (row["reason"] or ""), row
+    assert day in row["reason"]
+    assert row["reason"] != "Unchanged since the last push.", \
+        "the preview's sentence, said without looking at the calendar"
+    assert second["summary"]["noop"] == 1
+
+    reads = [c for c in live_client.garmin.calls[mark:] if c[0] == "list"]
+    assert reads, "the skip was decided without looking at the calendar"
+    assert garmin_writes(live_client, mark) == [], \
+        "a confirmed no-op wrote to the athlete's account"
+    assert len(live_client.garmin.rows) == 1
+
+
+def test_a_preview_reports_a_noop_as_pending_not_as_something_already_done(
+        live_client, monkeypatch):
+    """A preview has not done anything, and its rows must not claim to have.
+
+    `state` used to be set to "skipped" for a previewed noop, which is what the
+    real run then short-circuited on. It is also what the send button reads:
+    `static/index.html` enables it only while some item is not "skipped", so a
+    week whose sessions all preview as noop offered the athlete no way to
+    press Send — and pressing Send is the only way back from a copy deleted in
+    Garmin Connect.
+    """
+    monkeypatch.setenv(web_app.ALLOW_GARMIN_WRITES_ENV, "1")
+    day = week2(1)
+    uid = calendar(live_client, day, day)["days"][0]["workouts"][0]["uid"]
+    approve_for_push(live_client, uid)
+    assert run_push(live_client, start=day, end=day)["state"] == "done"
+
+    mark = len(live_client.garmin.calls)
+    preview = push(live_client, start=day, end=day, dry_run=True)
+    row = next(i for i in preview["items"] if i["uid"] == uid)
+    assert row["action"] == "noop", "the preview's verdict about the plan"
+    assert row["state"] == "pending", \
+        "a preview reported an item as finished before anything ran"
+    assert preview["summary"]["noop"] == 1, \
+        "the preview must still say what it expects to do"
+    assert garmin_writes(live_client, mark) == [], "a preview wrote to Garmin"
+
+    assert [i for i in preview["items"] if i["state"] != "skipped"], \
+        "the page would draw Send disabled on this preview"
+    with open(os.path.join(HERE, "static", "index.html"),
+              encoding="utf-8") as fh:
+        rule = re.search(r"const sendable[^;]+;", fh.read())
+    assert rule and '"skipped"' in rule.group(0), \
+        "the send button no longer keys off item state — re-check this test"
+
+
+def test_an_unconfirmable_noop_says_so_on_the_row_instead_of_claiming_success(
+        live_client, monkeypatch):
+    """A month this app could not read is not a month with the copy still on
+    it. The preview's flat "Unchanged since the last push." is precisely the
+    claim it is not entitled to make, and now that the writer runs, its
+    hedged sentence is what the athlete gets — with nothing written."""
+    monkeypatch.setenv(web_app.ALLOW_GARMIN_WRITES_ENV, "1")
+    day = week2(1)
+    uid = calendar(live_client, day, day)["days"][0]["workouts"][0]["uid"]
+    approve_for_push(live_client, uid)
+    assert run_push(live_client, start=day, end=day)["state"] == "done"
+
+    block_calendar_reads(live_client)
+    mark = len(live_client.garmin.calls)
+    blind = run_push(live_client, start=day, end=day)
+    row = next(i for i in blind["items"] if i["uid"] == uid)
+    assert "couldn't read your Garmin calendar" in (row["reason"] or ""), row
+    assert row["reason"] != "Unchanged since the last push."
+    assert garmin_writes(live_client, mark) == []
+    assert len(live_client.garmin.rows) == 1
+
+
+def test_a_local_skip_is_still_never_handed_to_the_writer(live_client,
+                                                          monkeypatch):
+    """The widening stops at the writer's own decisions. A session the athlete
+    struck off his week, and one he has not approved, are decisions made here
+    — no call, no write, and the copy already on Garmin left exactly where it
+    is, with the row saying where it comes off."""
+    monkeypatch.setenv(web_app.ALLOW_GARMIN_WRITES_ENV, "1")
+    struck, day = a_pushed_session(live_client)
+    approve_for_push(live_client, struck)
+    ok(live_client.patch(f"/api/workouts/{struck}", json={"status": "skipped"}))
+    unapproved = calendar(live_client, week2(3), week2(3))[
+        "days"][0]["workouts"][0]["uid"]
+
+    mark = len(live_client.garmin.calls)
+    job = run_push(live_client, select="explicit", start=week2(0),
+                   end=week2(6), uids=[struck, unapproved])
+    assert job["state"] == "done", job
+    rows = {i["uid"]: i for i in job["items"]}
+    assert rows[struck]["action"] == "skip"
+    assert "Garmin Connect" in rows[struck]["reason"]
+    assert rows[unapproved]["action"] == "skip"
+    assert "Approve for push" in rows[unapproved]["reason"]
+    assert job["summary"]["skipped"] == 2
+
+    assert garmin_writes(live_client, mark) == [], \
+        "a local decision reached the athlete's Garmin account"
+    assert len(live_client.garmin.rows) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -2428,15 +2672,38 @@ def test_a_full_calendar_render_makes_no_outbound_call(live_client,
 def test_a_push_with_writes_on_makes_no_outbound_call(live_client, monkeypatch,
                                                       no_outbound_calls):
     """And the write path, with the env gate actually set — the fake account
-    is the only thing it may ever reach."""
+    is the only thing it may ever reach.
+
+    The push has to run the whole way down and *succeed*. This test used to
+    accept `job["state"] in ("done", "partial", "failed")` against a fake that
+    implemented only the two calls a removal makes, so the push died on its
+    first write hop — `'FakeGarminCalendar' object has no attribute
+    'upload_workout'` — and the assertion accepted the failure. All it proved
+    was that a push which never happens makes no outbound call, while the
+    README cited it for the opposite claim.
+
+    So both halves are here: a create, and then a move, which between them
+    make every call the writer has — upload, schedule, month read, unschedule
+    — and every one of them lands on the fake.
+    """
     monkeypatch.setenv(web_app.ALLOW_GARMIN_WRITES_ENV, "1")
     day = week2(1)
     uid = calendar(live_client, day, day)["days"][0]["workouts"][0]["uid"]
     approve_for_push(live_client, uid)
-    job = push(live_client, start=day, end=day, dry_run=False)
-    for _ in range(50):
-        job = ok(live_client.get(f"/api/push/{job['job_id']}"))
-        if job["state"] in ("done", "partial", "failed"):
-            break
-        time.sleep(0.05)
-    assert job["state"] in ("done", "partial", "failed")
+
+    created = run_push(live_client, start=day, end=day)
+    assert created["state"] == "done", created
+    assert created["summary"]["created"] == 1, created["items"]
+    assert len(live_client.garmin.rows) == 1
+
+    moved_to = week2(3)
+    ok(live_client.patch(f"/api/workouts/{uid}", json={"date": moved_to}))
+    garmin_reread(live_client)
+    moved = run_push(live_client, start=week2(0), end=week2(6))
+    assert moved["state"] == "done", moved
+    assert moved["summary"]["rescheduled"] == 1, moved["items"]
+    assert [row["date"] for row in live_client.garmin.rows] == [moved_to]
+
+    kinds = [call[0] for call in live_client.garmin.calls]
+    for hop in ("upload", "schedule", "list", "unschedule"):
+        assert hop in kinds, f"the push never made a {hop} call: {kinds}"

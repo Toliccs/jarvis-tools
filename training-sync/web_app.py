@@ -2387,10 +2387,17 @@ STILL_ON_GARMIN = ("Marked skipped — but this app's copy is still on your "
                    "on your Edge.")
 
 
-def build_push_items(service, calendar, workouts, dry_run):
+def build_push_items(service, calendar, workouts):
     """Ask the writer what it *would* do. `push_workout(dry_run=True)` decides
     the action from the stored hash and date without making a single network
-    call, so the preview is honest and works with no Garmin session."""
+    call, so the preview is honest and works with no Garmin session.
+
+    Always a preview — there is no parameter here for doing it for real. There
+    was one (`dry_run`), it was never read, and what it hid is that the preview
+    was being taken as the outcome: the rows it produced were written into the
+    job, and a "noop" among them stopped the real writer from ever running.
+    Building the list and doing the work are different jobs; this one only
+    builds the list. `run_push_job` does the work."""
     module, error = load_module("garmin_workout_writer")
     if module is None:
         raise ApiError("source_unavailable",
@@ -2439,7 +2446,14 @@ def build_push_items(service, calendar, workouts, dry_run):
                 store=calendar.store, dry_run=True,
                 plan_snapshot=calendar.snapshot_for(workout["uid"]))
             row = result.to_dict()
-            row["state"] = "skipped" if row["action"] == "noop" else "pending"
+            # Pending, whatever the preview expects to do — including a noop.
+            # Nothing has run yet, and a row that says otherwise is read as a
+            # finished one: the job skipped it, and the page's send button
+            # (`static/index.html`, `sendable`) greys out on a week of them,
+            # which is the one week the athlete most needs to send. What the
+            # preview predicts lives in `action`, and the summary counts it
+            # from there.
+            row["state"] = "pending"
             row["on_garmin"] = on_garmin
             items.append(row)
         except Exception as exc:
@@ -2513,7 +2527,18 @@ def run_push_job(service, job_id):
         current = service.get_job(job_id)
         if current and current.get("state") == "cancelled":
             return
-        if item["state"] == "skipped":
+        if item["action"] == "skip":
+            # A local decision — struck off the week, in the past, or not
+            # approved — settled here and never sent anywhere. Every other row
+            # goes to the writer, whatever the preview predicted for it.
+            #
+            # This used to short-circuit on `state == "skipped"`, which the
+            # preview also wrote onto a predicted "noop". So a noop was decided
+            # by a dry run that reads the stored hash and date and never looks
+            # at Garmin, and the writer's verification — the code that re-reads
+            # the month and re-sends a copy deleted in Garmin Connect — could
+            # not run on any push the athlete can trigger. Only the writer,
+            # against the calendar, gets to call something a no-op.
             done += 1
             continue
         workout = calendar.workout(item["uid"])
@@ -3291,7 +3316,7 @@ def create_app(demo=None):
         calendar = EffectiveCalendar(service)
         workouts, refused = _select_uids(calendar, start, end, select,
                                          body.get("uids"))
-        items = build_push_items(service, calendar, workouts, dry_run)
+        items = build_push_items(service, calendar, workouts)
         # Listed, not dropped: "I asked for the whole week and 4 went" is only
         # honest if the other 3 say why they didn't.
         items += [_not_approved_item(w) for w in refused]

@@ -32,6 +32,18 @@ DEFECT D7 a stored schedule id went straight to `unschedule`, so an unmarked
           update, and moved to another day by a reschedule.
 DEFECT D8 a no-op said "Already on Garmin" without reading the calendar, and
           went on saying it after the athlete deleted the session there.
+DEFECT D2 both ownership reads were scoped to one month, so a copy dragged
+          across a month boundary in Garmin Connect was invisible: every
+          branch created a second copy, silently, and re-pointed the push
+          record at it.
+DEFECT D3 the marker encodes the uid, so a TrainingPeaks feed regeneration —
+          which the store deliberately survives by re-keying the push record —
+          left every pushed workout refusing for ever, on the strength of "it
+          carries no marker of this app's" about a row that plainly had one.
+DEFECT D7 "try again in a moment" was offered for conditions no moment
+          clears: a body that is not a calendar reads the same way every time.
+DEFECT D4 a schedule row with its template nested inside it read as two rows,
+          neither addressable, so update and reschedule refused permanently.
 
 There is no removal path to test any more, and no tests for one. Taking a
 session off the Garmin calendar is done in Garmin Connect; `unpush_workout`
@@ -48,10 +60,68 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import garmin_workout_writer as writer_module  # noqa: E402
 from plan_store import PlanStore  # noqa: E402
 
+
+# --- the hard guard: nothing in this file may reach the network ------------
+#
+# Every test here drives a fake, so any real call is a bug in the test rather
+# than a deliberate one — which is exactly why it has to be enforced instead
+# of assumed. This module is the one that opens the connection (`_build_client`
+# imports `GarminClient`, which constructs `garminconnect.Garmin`), so the
+# guard belongs where the calls would originate.
+#
+# Two boundaries, because one is not enough. `garminconnect` 0.3.2 drives its
+# login through curl_cffi, i.e. libcurl, which never touches a Python socket —
+# a socket-only guard watches a door that traffic does not use. So: the
+# library constructor, the libcurl handle underneath it, curl_cffi's own
+# session, and the two stdlib paths, all nailed shut.
+
+
+@pytest.fixture(autouse=True)
+def no_outbound_calls(monkeypatch):
+    attempts = []
+
+    def forbid(label):
+        def refuse(*args, **kwargs):
+            attempts.append(label)
+            raise AssertionError(f"outbound call attempted via {label}")
+        return refuse
+
+    try:
+        import garminconnect
+        monkeypatch.setattr(garminconnect, "Garmin",
+                            forbid("garminconnect.Garmin"))
+    except ImportError:  # pragma: no cover - library not installed
+        pass
+    try:
+        # Patched on the class, not on a name that happens to be imported
+        # here: every reference in every module shares this one class object,
+        # so `from curl_cffi.curl import Curl` elsewhere cannot slip past it.
+        from curl_cffi.curl import Curl
+        from curl_cffi.requests import Session
+        monkeypatch.setattr(Curl, "perform", forbid("curl_cffi Curl.perform"))
+        monkeypatch.setattr(Session, "request",
+                            forbid("curl_cffi Session.request"))
+    except ImportError:  # pragma: no cover - library not installed
+        pass
+    import socket
+    import urllib.request
+    monkeypatch.setattr(socket.socket, "connect", forbid("socket.connect"))
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        forbid("urllib.request.urlopen"))
+
+    yield attempts
+    assert attempts == [], attempts
+
 # Same week the rest of the suite pins, and a date whose month (2026-08) is the
 # one the calendar render caches in the reproduction.
 SAT, SUN = "2026-08-01", "2026-08-02"
 AUG = (2026, 8)
+
+# The other side of a month boundary, in both directions. Aug 1 sits one day
+# from July and a drag across a month edge is an ordinary gesture in Garmin
+# Connect's calendar, where the grid shows the neighbouring months' days too.
+NEXT_MONTH = "2026-09-05"
+PREV_MONTH = "2026-07-28"
 
 _UNSET = object()
 
@@ -166,6 +236,38 @@ class NestedCalendarApi(FakeGarminApi):
             by_date.setdefault(day, []).append(row)
         return {"calendarItems": [{"scheduleDate": day, "items": rows}
                                   for day, rows in sorted(by_date.items())]}
+
+
+class NestedTemplateApi(FakeGarminApi):
+    """The same calendar in Garmin's third envelope: a schedule row that
+    carries the calendar entry and the date, with the workout template it
+    points at nested inside it.
+
+    A common REST idiom for a schedule, and the one shape where the ids of a
+    single session live on two levels: the schedule id on the row, the workout
+    id and the (marked) name on the template underneath.
+    """
+
+    def get_scheduled_workouts(self, year, month):
+        prefix = f"{int(year):04d}-{int(month):02d}"
+        self.calls.append(("list", prefix))
+        if self.fail_listing:
+            raise RuntimeError("Garmin calendar is unavailable")
+        if self.listing_payload is not _UNSET:
+            return self.listing_payload
+        items = []
+        for row in self.calendar:
+            if not row["date"].startswith(prefix):
+                continue
+            entry = {
+                "calendarDate": row["date"],
+                "workout": {"workoutId": row["workoutId"],
+                            "workoutName": row["title"]},
+            }
+            if self.expose_schedule_ids:
+                entry["workoutScheduleId"] = row["workoutScheduleId"]
+            items.append(entry)
+        return {"calendarItems": items}
 
 
 def fresh_store(tmp_path, name="state.json"):
@@ -979,18 +1081,25 @@ def test_a_month_that_could_not_be_read_is_never_answered_as_empty(tmp_path):
 
 
 def test_the_owned_row_lookup_says_when_it_could_not_look(tmp_path):
-    """`find_owned_scheduled` answered "(None, None)" both for "nothing of
-    ours is on that day" and for "no idea, the read failed" — and its one
-    caller creates a workout on the strength of that answer."""
+    """The owned-row lookup answered "(None, None)" both for "nothing of ours
+    is on that day" and for "no idea, the read failed" — and its one caller
+    creates a workout on the strength of that answer. It now answers in rows
+    plus a read status, so the two can no longer be confused."""
     store = fresh_store(tmp_path)
     writer, api = writer_for(store)
     push_threshold(writer, store, SAT)
 
-    assert writer.find_owned_scheduled("u1", SAT) == (999, 5000, "resolved")
-    assert writer.find_owned_scheduled("u1", SUN) == (None, None, "absent")
+    rows, status = writer.owned_rows("u1", SAT)
+    assert status == writer_module.CALENDAR_READ
+    assert [(r["date"], r["workout_id"], r["schedule_id"]) for r in rows] == [
+        (SAT, 999, 5000)]
+
+    assert writer.owned_rows("u2", SAT) == ([], writer_module.CALENDAR_READ), \
+        "another uid's session is nothing of ours"
 
     api.fail_listing = True
-    assert writer.find_owned_scheduled("u1", SAT) == (None, None, "blocked")
+    assert writer.owned_rows("u1", SAT) == (
+        [], writer_module.CALENDAR_BLOCKED)
 
 
 def test_a_session_level_failure_is_not_a_blocked_month(tmp_path, monkeypatch):
@@ -1010,7 +1119,7 @@ def test_a_session_level_failure_is_not_a_blocked_month(tmp_path, monkeypatch):
     with pytest.raises(writer_module.GarminNotConfigured):
         writer.read_scheduled_rows(*AUG, refresh=True)
     with pytest.raises(writer_module.GarminNotConfigured):
-        writer.find_owned_scheduled("u1", SAT)
+        writer.owned_rows("u1", SAT)
     with pytest.raises(writer_module.GarminNotConfigured):
         writer.locate_owned_copies("u1", 999, 5000, SAT)
     assert api.calls == [], "a session-level failure reached the network"
@@ -1095,3 +1204,426 @@ def test_a_dry_run_create_touches_nothing_even_with_the_calendar_down(
     assert preview.action == "create" and preview.state == "pending"
     assert preview.dry_run is True
     assert api.calls == [], f"dry run touched Garmin: {api.calls}"
+
+
+# --- D2: a month boundary is not a safety boundary -------------------------
+#
+# Both ownership reads were scoped to one month: `locate_owned_copies` read the
+# month of the recorded date, `owned_rows` the month of the new one. A copy the
+# athlete dragged into the next month in Garmin Connect was invisible to both,
+# so every branch concluded "not there", created a second copy and re-pointed
+# the push record at it — orphaning the first where nothing would ever find it
+# again, since nothing here removes anything. Aug 31 <-> Sep 1 is an ordinary
+# drag, and Garmin Connect's month grid shows the neighbouring months' days.
+
+
+@pytest.mark.parametrize("dragged_to", [NEXT_MONTH, PREV_MONTH])
+def test_a_noop_sees_a_copy_dragged_into_the_next_month(tmp_path, dragged_to):
+    """D2, the noop branch — and the falsest sentence of the three.
+
+    "The copy pushed earlier is no longer on your Garmin calendar for
+    2026-08-01, so it was sent again" asserted the copy was gone when the app
+    had simply not looked at the month it was in. Two copies on the Edge,
+    state "done", no warning.
+    """
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT)
+    api.calendar[0]["date"] = dragged_to        # dragged in Garmin Connect
+    writer.invalidate_schedule_cache()
+    writes_before = list(api.writes())
+
+    second = push_threshold(writer, store, SAT)
+
+    assert len(api.calendar) == 1, (
+        f"a second copy went to the Edge: {api.calendar}")
+    assert api.writes() == writes_before, "nothing needed sending"
+    assert "no longer on your Garmin calendar" not in (second.reason or ""), (
+        f"claimed a copy was gone without looking for it: {second.reason}")
+    assert dragged_to in (second.reason or ""), (
+        f"found the copy off-month and said nothing: {second.reason}")
+
+
+def test_an_update_finds_the_copy_dragged_into_the_next_month(tmp_path):
+    """D2, the update branch: "Changed since the last push; replacing it..."
+    replaced nothing, because the copy it meant to replace was one month
+    over. The new version went up beside the old one."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT)
+    api.calendar[0]["date"] = NEXT_MONTH
+    writer.invalidate_schedule_cache()
+
+    changed = push_threshold(writer, store, SAT, duration_s=5400)
+
+    assert changed.state == "done", changed.reason
+    assert len(api.calendar) == 1, (
+        f"the superseded copy was left in the next month: {api.calendar}")
+    assert api.days() == [SAT]
+    assert ("unschedule", 5000) in api.calls
+    assert NEXT_MONTH in (changed.reason or ""), (
+        f"acted on an off-month copy in silence: {changed.reason}")
+
+
+def test_a_move_follows_a_copy_dragged_into_the_next_month(tmp_path):
+    """D2, the reschedule branch: "Already on Garmin for 2026-08-01, moving
+    to ..." — it was not on 2026-08-01, and the move put a second copy down
+    rather than moving the one that was there."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT)
+    api.calendar[0]["date"] = NEXT_MONTH
+    writer.invalidate_schedule_cache()
+
+    moved = push_threshold(writer, store, SUN)
+
+    assert moved.state == "done", moved.reason
+    assert api.days() == [SUN], f"a copy was left behind: {api.days()}"
+    assert NEXT_MONTH in (moved.reason or ""), (
+        f"moved an off-month copy in silence: {moved.reason}")
+
+
+def test_a_create_never_sends_a_second_copy_of_a_session_moved_off_month(
+        tmp_path):
+    """The same fact one branch further out: the record's ids are gone, so
+    this is a create — but a copy of *this* session, carrying this app's
+    marker for this uid, is on the calendar one month over. Creating beside
+    it is a duplicate on the Edge with nothing here able to remove either."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT)
+    api.calendar[0]["date"] = NEXT_MONTH
+    store.clear_push("u1")
+    writer.invalidate_schedule_cache()
+    writes_before = list(api.writes())
+
+    second = push_threshold(writer, store, SAT)
+
+    assert len(api.calendar) == 1, (
+        f"a second copy went to the Edge: {api.calendar}")
+    assert api.writes() == writes_before, "a refusal writes nothing at all"
+    assert second.state == "failed"
+    told = f"{second.error or ''} {second.reason or ''}"
+    assert NEXT_MONTH in told and "Garmin Connect" in told, told
+    assert "[ts:" not in told
+
+
+def test_a_copy_two_months_away_is_still_out_of_reach_and_said_so(tmp_path):
+    """The bound is honest, not silent. Neighbouring months are read because a
+    drag lands there; a copy further out than the app looked is still missed,
+    so the months it could not account for are named rather than passed off as
+    proof the calendar is clear."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT)
+
+    months = writer_module._plausible_months([SAT])
+
+    assert "2026-08" in months
+    assert "2026-07" in months and "2026-09" in months, (
+        f"a drag across a month edge is invisible to {months}")
+    assert len(months) <= 4, f"a push may not fan out over {months}"
+
+
+# --- D3: a feed regeneration must not brick every pushed workout -----------
+#
+# The marker encodes the uid, and `rematch_orphans` deliberately re-keys the
+# push record to the new uid when TrainingPeaks regenerates the feed — "the
+# whole defense" against that regeneration wiping the athlete's work. The
+# marker already on the Garmin calendar still encodes the old uid, so the
+# ownership read found nothing of "ours", the stored ids still matched a row,
+# and every push after the re-key refused as OWNED_UNPROVEN. The refusal told
+# the athlete the row "carries no marker of this app's" — which `row["marked"]`
+# says plainly is untrue.
+
+
+def push_with_snapshot(writer, store, uid, date, duration_s=3600):
+    return writer.push_workout(
+        uid, "Threshold 3x12min", date, duration_s=duration_s, store=store,
+        plan_snapshot={"title": "Threshold 3x12min", "date": date})
+
+
+def test_a_feed_regeneration_does_not_brick_a_pushed_workout(tmp_path):
+    """D3 — reproduced: push, re-key, push, push. The second refused, the
+    third refused, and it never recovered; the athlete was told to delete his
+    own synced session in Garmin Connect, one per workout."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_with_snapshot(writer, store, "old@tp", SAT)
+    assert store.rematch_orphans(
+        [{"uid": "new@tp", "title": "Threshold 3x12min", "date": SAT}]
+    ) == [("old@tp", "new@tp")], "precondition: the store re-keys the record"
+
+    again = push_with_snapshot(writer, store, "new@tp", SAT)
+
+    assert again.state == "done", (
+        f"a re-keyed push was refused: {again.action} / {again.reason}")
+    assert len(api.rows_on(SAT)) == 1, (
+        f"the re-key left two copies on the Edge: {api.rows_on(SAT)}")
+    assert writer_module.owns_workout(api.rows_on(SAT)[0]["title"], "new@tp"), \
+        "the copy on the calendar now answers to the uid the feed uses"
+    told = f"{again.error or ''} {again.reason or ''}"
+    assert "carries no marker" not in told, told
+
+
+def test_a_re_keyed_workout_settles_instead_of_refusing_forever(tmp_path):
+    """The third push in the reproduction. Once the re-key is recognised the
+    next push is an ordinary no-op, not a second refusal."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_with_snapshot(writer, store, "old@tp", SAT)
+    store.rematch_orphans(
+        [{"uid": "new@tp", "title": "Threshold 3x12min", "date": SAT}])
+    push_with_snapshot(writer, store, "new@tp", SAT)
+
+    third = push_with_snapshot(writer, store, "new@tp", SAT)
+
+    assert (third.action, third.state) == ("noop", "skipped"), (
+        f"still not settled: {third.action} / {third.state} / {third.reason}")
+    assert len(api.rows_on(SAT)) == 1
+
+
+def test_a_marked_row_the_record_does_not_point_at_is_still_not_ours(tmp_path):
+    """The limit of the re-key rule. A row carrying the marker of *another*
+    uid, which this uid's ids do not address, is not this app's copy of this
+    session — the marker travels with the record's ids or not at all."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT, uid="u2")        # theirs: 999 / 5000
+    store.record_push("u1", workout_id=4242, schedule_id=7777,
+                      scheduled_for=SAT, pushed_hash="stale")
+
+    changed = push_threshold(writer, store, SAT, uid="u1", duration_s=5400)
+
+    assert not [c for c in api.calls if c[0] == "unschedule"], (
+        "unscheduled a copy belonging to another uid")
+    assert 5000 in [r["workoutScheduleId"] for r in api.rows_on(SAT)], \
+        "the other uid's session is gone"
+    assert changed.state == "done"
+
+
+def test_the_unproven_refusal_is_only_told_about_an_unmarked_row(tmp_path):
+    """The sentence itself. "It carries no marker of this app's" is a claim
+    `row["marked"]` can check, and it may only be made about a row where that
+    is False — the athlete's own session, which is what the refusal exists
+    for."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    _a_row_this_app_did_not_write(store, api, SAT, "Wednesday club run")
+
+    changed = push_threshold(writer, store, SAT, duration_s=5400)
+
+    told = f"{changed.error or ''} {changed.reason or ''}"
+    assert changed.state == "failed"
+    assert "carries no marker" in told, told
+
+
+# --- D7: "try again in a moment" is only offered when a moment would help ---
+
+
+def test_a_calendar_this_app_cannot_parse_is_not_a_wait_and_retry(tmp_path):
+    """D7 — `read_calendar` is strict per entry, so one sibling row with a
+    date key this module does not know makes the whole month BLOCKED. Nothing
+    about that clears on a retry, and "Try again in a moment" is the only
+    thing the athlete was told."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT)
+    store.clear_push("u1")
+    api.listing_payload = {"calendarItems": [{
+        "workoutId": 999, "workoutScheduleId": 5000,
+        "workoutName": writer_module.marked_workout_name(
+            "Threshold 3x12min", "u1"),
+        "scheduledOnDay": SAT,
+    }]}
+
+    second = push_threshold(writer, store, SAT)
+
+    assert second.state == "failed"
+    told = f"{second.error or ''} {second.reason or ''}"
+    assert "Try again in a moment" not in told, (
+        f"offered a retry for something that never clears: {told}")
+    assert "same answer" in told, f"no diagnosis at all: {told}"
+    assert "[ts:" not in told, "the ownership marker is not shown to a person"
+
+
+def test_a_null_body_is_structural_too(tmp_path):
+    """The other half of the reproduction: a None body. Also permanent, also
+    told to try again in a moment."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT)
+    api.listing_payload = None
+
+    second = push_threshold(writer, store, SAT, duration_s=5400)
+
+    told = f"{second.error or ''} {second.reason or ''}"
+    assert second.state == "failed"
+    assert "Try again in a moment" not in told, told
+    assert "same answer" in told, told
+
+
+def test_a_read_that_really_failed_still_offers_the_retry(tmp_path):
+    """The half that must not be lost. A call that failed, and a Garmin
+    answering 429, are exactly the conditions a moment does clear — and the
+    athlete has nothing to tidy up."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT)
+    store.clear_push("u1")
+    api.fail_listing = True
+
+    second = push_threshold(writer, store, SAT)
+
+    told = f"{second.error or ''} {second.reason or ''}"
+    assert second.state == "failed"
+    assert "Try again in a moment" in told, told
+
+
+def test_a_noop_says_which_kind_of_unreadable_it_hit(tmp_path):
+    """The same distinction on the branch that writes nothing either way: a
+    no-op that cannot confirm its copy says whether waiting would help."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT)
+    api.listing_payload = {"alpha": [], "beta": []}   # no telling which list
+
+    second = push_threshold(writer, store, SAT)
+
+    assert second.state == "skipped"
+    assert "couldn't" in (second.reason or "").lower(), second.reason
+    assert "just now" not in (second.reason or ""), (
+        f"a permanent shape problem described as a passing one: {second.reason}")
+
+
+def test_an_empty_month_in_a_counted_envelope_is_still_empty(tmp_path):
+    """Strictness must not become brittleness, and the three empty shapes stay
+    empty-and-read. A push that refused on any of them would be a writer that
+    can never write."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    api.listing_payload = {"numOfItems": 0, "workoutScheduleList": []}
+
+    assert writer.read_scheduled_rows(*AUG, refresh=True) == (
+        [], writer_module.CALENDAR_READ)
+
+
+# --- D4: a nested template is one session, not two rows --------------------
+#
+# `_iter_dated_rows` yielded every dict in the response as a candidate row. For
+# a schedule row carrying its template inside it the ids sit on both levels, so
+# one session came out as two rows: a parent with the schedule id and no name,
+# and a child with the workout id and the marked name. Only the child was
+# "ours", and it had no schedule id; the stored-id fallback then refused itself
+# because the parent had already put that id into `taken`. Update and
+# reschedule both failed permanently, and deleting and re-pushing landed back
+# in the same place.
+
+
+def test_a_schedule_row_with_its_template_nested_is_one_session(tmp_path):
+    """The source fact. One session on the calendar is one row, with both of
+    its ids and its name, whichever level Garmin hung them on."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store, NestedTemplateApi())
+    push_threshold(writer, store, SAT)
+
+    rows = writer.scheduled_rows(*AUG, refresh=True)
+
+    assert len(rows) == 1, f"one session read as {len(rows)} rows: {rows}"
+    assert (rows[0]["date"], rows[0]["workout_id"], rows[0]["schedule_id"]) \
+        == (SAT, 999, 5000)
+    assert writer_module.owns_workout(rows[0]["raw_title"], "u1")
+    assert rows[0]["title"] == "Threshold 3x12min"
+
+
+def test_an_update_lands_as_one_copy_in_the_nested_template_shape(tmp_path):
+    """The consequence that reaches the athlete: an update that refused
+    forever, with nothing they could do about it."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store, NestedTemplateApi())
+    push_threshold(writer, store, SAT)
+
+    changed = push_threshold(writer, store, SAT, duration_s=5400)
+
+    assert changed.state == "done", (
+        f"refused itself on Garmin's own envelope: {changed.reason}")
+    assert changed.action == "update"
+    assert len(api.rows_on(SAT)) == 1, "the superseded copy came off"
+    assert ("unschedule", 5000) in api.calls
+
+
+def test_a_move_lands_as_one_copy_in_the_nested_template_shape(tmp_path):
+    """The same for a reschedule, which had the same two halves of one session
+    and the same permanent refusal."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store, NestedTemplateApi())
+    push_threshold(writer, store, SAT)
+
+    moved = push_threshold(writer, store, SUN)
+
+    assert moved.state == "done", moved.reason
+    assert api.days() == [SUN], f"a copy was left behind: {api.days()}"
+    assert ("unschedule", 5000) in api.calls
+
+
+def test_two_nested_sessions_on_one_day_are_still_two_sessions(tmp_path):
+    """The half that must not be lost to the merge: two sessions on one day
+    keep their own ids and their own names. Folding one session's id into
+    another session's name is how this app came to overwrite a workout that
+    was never its own."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store, NestedTemplateApi())
+    push_threshold(writer, store, SAT, uid="u1")
+    push_threshold(writer, store, SAT, uid="u2")
+
+    rows = sorted(writer.scheduled_rows(*AUG, refresh=True),
+                  key=lambda r: r["workout_id"])
+
+    assert [r["workout_id"] for r in rows] == [999, 1000]
+    assert [r["schedule_id"] for r in rows] == [5000, 5001]
+    assert writer_module.owns_workout(rows[0]["raw_title"], "u1")
+    assert writer_module.owns_workout(rows[1]["raw_title"], "u2")
+
+
+def test_a_nested_template_without_a_schedule_id_is_still_one_row(tmp_path):
+    """Garmin declining to expose the schedule id leaves the parent an
+    envelope: a date and nothing else. The session is still one row — the
+    template's — and the writer's own conflict path takes it from there."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store, NestedTemplateApi())
+    push_threshold(writer, store, SAT)
+    api.expose_schedule_ids = False
+    writer.invalidate_schedule_cache()
+
+    rows = writer.scheduled_rows(*AUG, refresh=True)
+
+    assert len(rows) == 1, f"one session read as {len(rows)} rows: {rows}"
+    assert rows[0]["workout_id"] == 999 and rows[0]["schedule_id"] is None
+
+
+# --- the guard on this file, watched failing -------------------------------
+
+
+def test_the_network_guard_on_this_file_actually_bites(no_outbound_calls):
+    """A guard nobody has watched fail is a guard nobody knows is connected.
+
+    Both boundaries are checked because neither covers the other.
+    `garmin_client` does `from garminconnect import Garmin` at import time, so
+    once that module has been imported by anything in the session its own name
+    for the class is already bound and patching `garminconnect.Garmin`
+    afterwards cannot reach it. What still catches that path is the layer
+    underneath: `garminconnect` 0.3.2 logs in through curl_cffi, i.e. libcurl,
+    which is also the layer a socket-only guard cannot see at all.
+    """
+    import garminconnect
+    from curl_cffi.requests import Session
+
+    with pytest.raises(AssertionError):
+        garminconnect.Garmin("nobody@example.invalid", "not-a-password")
+    with pytest.raises(AssertionError):
+        Session().request("GET", "https://connect.garmin.com/")
+
+    assert no_outbound_calls == ["garminconnect.Garmin",
+                                 "curl_cffi Session.request"], \
+        "a boundary this file claims to guard was not armed"
+    no_outbound_calls.clear()     # these attempts were the point of the test

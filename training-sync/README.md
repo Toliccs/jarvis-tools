@@ -13,7 +13,8 @@ times, one of which is a switch that ships turned off.
 
 Read the [Honest limitations](#honest-limitations) section before you rely on this. It is the
 most important section in this file. In particular: **nothing in here has ever run against a
-real Garmin account.**
+real Garmin account.** When you are ready to change that, follow [The first real push, step by
+step](#the-first-real-push-step-by-step) rather than improvising.
 
 ---
 
@@ -142,8 +143,15 @@ GARMIN_PASSWORD=...
 These are stored only in your local `.env` and only ever sent to Garmin's own login endpoint.
 Having them here makes a push *possible*; it does not make one happen — see the next section.
 
-If your Garmin account has two-factor authentication turned on, expect login to fail. This
-hasn't been tested against a 2FA account.
+Before you put your password in here, read [How this reaches
+Garmin](#how-this-reaches-garmin) in the limitations. There is no consumer API for Garmin, and
+the library this uses to log in does things on the way in that you should know about rather
+than find out about.
+
+**If your Garmin account has two-factor authentication turned on, login will fail.** Not "may"
+— the library is given no way to ask you for a code, so it stops with *"MFA Required but no
+prompt_mfa mechanism supplied"*. Never tested against a real 2FA account, because nothing here
+has been tested against a real account at all.
 
 ### 5. Two settings worth filling in
 
@@ -208,25 +216,104 @@ re-sending an unchanged workout is a no-op, not a duplicate.
 
 ---
 
+## The first real push, step by step
+
+Nothing here has ever run against a real Garmin account. The first time you press Send, you
+are the test. Do it in this order, on a day that doesn't matter, and stop at the first step
+that doesn't behave. It takes half an hour and it is worth all of it.
+
+**Pick your crash-test day first.** A rest day, or a day a week or two out that you already
+know you're not riding. Not tomorrow's session.
+
+1. **Leave the write switch off.** In `.env`, check that `TRAINING_SYNC_ALLOW_GARMIN_WRITES`
+   is absent or `0`. Steps 2 to 4 all work with it off, and with it off nothing can reach your
+   account no matter what you click.
+
+2. **Start it and check it can read your Garmin calendar.** `python3 web_app.py`, then open
+   <http://127.0.0.1:8765>. Under each day in the week view there's a Garmin panel. On a day
+   with something on your Garmin calendar it says *"1 session on Garmin"* (or 2, or 3), and
+   lists them. On a genuinely empty day it says nothing.
+
+   What you are hunting for is the third thing: a day marked **"Garmin calendar unread"**, or
+   a banner above the grid saying this app couldn't read your Garmin calendar. That is not an
+   empty calendar, it's a blind app, and everything below depends on it not being blind.
+
+3. **Check more than one month.** Step forward a few weeks and switch to the month view, so
+   you cross at least two month boundaries. Garmin hands its calendar over one month at a
+   time, so "this month reads fine" is a different claim from "next month reads fine", and
+   this app has to read the month either side of a day to be sure about it. If a month comes
+   back unread, sort that out before going on — a push that can't read the month it's writing
+   into refuses rather than writes, so you'd just be collecting refusals.
+
+4. **Preview a push, with the switch still off.** Tick **Approve for push** on your one
+   crash-test workout (its `⋮` menu), press **Push to Garmin**, and read the drawer. One row,
+   action *create*, with a reason. It should say it'll go as a timed placeholder. Nothing has
+   been sent — this preview makes no network calls at all, in any configuration. If the drawer
+   shows rows you didn't approve, or a date you didn't expect, close it and work out why
+   before turning anything on.
+
+5. **Now turn the switch on and send that one workout.** Put
+   `TRAINING_SYNC_ALLOW_GARMIN_WRITES=1` in `.env`, restart the app, approve the same single
+   workout, preview it again, and press **Send to Garmin**. One workout. Not the week.
+
+6. **Go and look at Garmin Connect with your own eyes, and count.** Open Garmin Connect in a
+   browser, go to that day, and count the rows. You are checking three things, in this order:
+   **exactly one** session (not two — two is the failure that matters most), on the **right
+   day**, with roughly the right name and length. The name will have a tag like `[ts:1a2b3c4d]`
+   on it; that's deliberate, it's how this app recognises its own work.
+
+   If you see two copies, stop there. Delete both in Garmin Connect, and don't push anything
+   else until you know why it happened — a duplicate is the one failure this app cannot clean
+   up after itself, because it never removes anything.
+
+7. **Sync the Edge 520 and check it arrives there too.** The app puts things on your Garmin
+   *calendar*; the head unit picks them up on its next sync, and this app cannot see whether
+   that happened. Only you can.
+
+8. **Now break it on purpose: delete that workout in Garmin Connect, and push again.** This is
+   the most important step, because it's the thing that used to fail silently. Delete the
+   session in Garmin Connect, come back to the app, and push the same workout again.
+
+   The preview will say *"Unchanged since the last push"* — it doesn't know, because it makes
+   no network calls. **Press Send anyway.** The real run looks at your calendar before it
+   trusts its own record, and should report the row as a **create**, with a reason along the
+   lines of *"The copy pushed earlier is no longer on your Garmin calendar for … , so it was
+   sent again."*
+
+   Go back to Garmin Connect and confirm it is there again, and there once. If instead the job
+   reports success and your calendar is still empty, then the defect described in [Three ways it
+   lost track](#three-ways-it-lost-track-of-what-was-actually-on-your-garmin-calendar) is back,
+   the app is lying to you, and the "✓ On Garmin" label cannot be trusted on any card. Stop
+   there.
+
+9. **Only then, a week.** If steps 6 and 8 both came out right, approve a week and push it.
+   Count the rows in Garmin Connect again afterwards. Do not skip the counting for the first
+   few weeks; a duplicate is easy to fix on the day it appears and confusing a month later.
+
+Do not set up anything automatic, scheduled or unattended. Not now, and not once it's working.
+
+---
+
 ## Honest limitations
 
 This is the section to read twice.
 
 ### Nothing here has ever been run against a real Garmin account
 
-Every test in this repo — all 308 of them — runs against fakes. No real workout has ever been
-created, scheduled, or moved by this code. The first time you press Send is genuinely
-untested territory, and the way Garmin's unofficial endpoints respond in practice is exactly
-where this kind of code goes wrong.
+Every test in this repo runs against fakes. No real workout has ever been created, scheduled
+or moved by this code, no real Garmin login has ever been performed by it, and no real Garmin
+error response has ever been seen by it. The first time you press Send is genuinely untested
+territory, and the way Garmin's unofficial endpoints answer in practice is exactly where this
+kind of code goes wrong.
 
-So: **start small.**
+Every defect in the round-6 list below was found by reading the code and reasoning about it —
+not by anything failing on a real account, because nothing has ever been tried on one. That
+cuts both ways: there are almost certainly others of the same kind still in here that reading
+did not catch.
 
-1. Run the dry-run preview and read every row.
-2. Approve **one** workout, for a day you don't mind getting wrong, and send that.
-3. Open Garmin Connect in a browser and look at the calendar with your own eyes. Confirm the
-   session is on the right day, with roughly the right name and duration.
-4. Sync the Edge and confirm it arrives there too.
-5. Only after that, trust it with a week.
+So: **start small, and follow [The first real push, step by
+step](#the-first-real-push-step-by-step)** above. It exists so you don't have to invent a safe
+order under pressure.
 
 Do not set up anything automatic or unattended.
 
@@ -262,6 +349,49 @@ and that is the boundary this app stays inside.
 `trainingpeaks_client.py` is a skeleton for the Partner API, sitting unused. If TrainingPeaks
 ever reopen partner access, that's where credentials would go. Until then it raises an error
 pointing back here.
+
+### How this reaches Garmin
+
+The section above refuses to build anything that works around TrainingPeaks' bot detection.
+That refusal stands. It would be inconsistent to say it and then stay quiet about the Garmin
+side, so — plainly, because an earlier version of this file said the opposite:
+
+Garmin has no consumer API. There is no "generate a token" button on your account, and no
+supported way for a program you run to read your own Garmin data. Every third-party Garmin
+tool works around that the same way: by logging in with your credentials against the endpoints
+Garmin's own apps use. That much this file has always said.
+
+What it did not say is how the library gets that login accepted. `garminconnect` 0.3.2 tries
+five strategies in turn — the iOS app's login endpoint, the same over plain `requests`, an SSO
+embed widget, the web portal, the portal over plain `requests`. Three of them go through
+`curl_cffi`, which makes the connection present the TLS fingerprint of Safari, Safari on iOS,
+Chrome or Edge rather than Python's, and two of those rotate through that list when one gets
+refused — because, in the library's own comment, different fingerprints land in different
+Cloudflare rate-limit buckets. The portal strategy generates a randomised browser User-Agent
+and matching `sec-ch-ua` headers. And two of the five wait a random 3-8 or 10-20 seconds
+before posting, which the library's own constants call an *anti-WAF delay* and its own comment
+explains as Cloudflare treating a fast GET-then-POST as bot-like.
+
+That is browser impersonation, on the way in to your own account. This project writes none of
+it and adds none of it — but it depends on it, and "it's in a dependency" is not a distinction
+that would matter to Garmin. So the accurate statement is: your credentials, your account,
+your data, sent nowhere but Garmin, over a login that presents itself as a browser to get in.
+
+What that means for you:
+
+- **This is not sanctioned access.** Garmin offers no supported route for it, so nothing here
+  is covered by one — the same is true of every tool in this category. What that could cost you
+  in practice is not something this file knows; the obvious risk is the account being
+  rate-limited or locked. Their current terms of use are worth reading yourself rather than
+  taking a summary from here, because it is your account.
+- **Changing the dependency is your decision, not one to make quietly on your behalf.**
+  `garminconnect>=0.3.2` is pinned in `requirements.txt`. If you'd rather not rely on that
+  behaviour, there is one place to change: read and write both go through `GarminClient` in
+  `garmin_client.py`, which is the only login in the project.
+- **Logins are slow and can look like a hang.** If the first strategies get refused, those
+  sleeps mean one login can take most of a minute before it succeeds or gives up.
+- **Garmin can change any of it without notice**, and when they do, this stops working —
+  possibly in the middle of a push.
 
 ### The plan feed only gives text, and the details are guessed from it
 
@@ -326,6 +456,97 @@ the app knows a copy of it is still sitting on your Garmin calendar, it says so 
 points you at Garmin Connect. Where it *couldn't read* your Garmin calendar, it says that
 instead — "I could not check" is never drawn as "you're clear".
 
+### Three ways it lost track of what was actually on your Garmin calendar
+
+Found by review in round 6. All three are fixed, and all three fixes are verified against
+fakes only — none of this has been seen on a real account, because there has never been one.
+
+They are written up rather than quietly closed because they were all the same shape: the app
+believed its own record of what it had sent, in preference to the calendar Garmin would
+actually show you, and reported success on the strength of it. **If this app ever tells you
+something about your Garmin calendar that your own eyes disagree with, your eyes are right.**
+
+**1. Push a workout, delete it in Garmin Connect, push again — and it reported success over an
+empty calendar.** This is close to the first thing anyone would try, and it was broken. The
+second push compared the plan against its own record, concluded nothing had changed, reported
+*"noop, unchanged"*, made no call to Garmin at all, and left the card reading *"✓ On Garmin"*
+with nothing on your calendar. Nothing in this app re-adds a session on your behalf, so it
+would have stayed wrong until you found the workout missing on the bike.
+
+What it does now: a real push no longer skips on the strength of its own record. Before it
+declares there is nothing to do, it re-reads that month from Garmin — and the months either
+side — and then says one of four things:
+
+- the copy is there on the day → *"Already on your Garmin calendar for … , unchanged."*, and
+  nothing is written;
+- the copy is gone → the row becomes a **create**, the session is sent again, and the reason
+  reads *"The copy pushed earlier is no longer on your Garmin calendar for … , so it was sent
+  again."*;
+- the copy is on your calendar but on a different day, because you dragged it in Garmin
+  Connect → it says so and leaves it exactly where you put it. Your move wins;
+- the month couldn't be read → it says it couldn't check, and writes nothing.
+
+The part that still needs you: **the preview cannot see any of this.** It makes no network
+calls by design, so a session you deleted in Garmin Connect still previews as *"Unchanged since
+the last push"*. Press Send anyway — the real run is what looks. That's step 8 of the
+[first-push checklist](#the-first-real-push-step-by-step), and it is the only way back.
+
+**Still true, and worth knowing before it confuses you:** what got fixed is the *push*. The
+green **"✓ On Garmin"** badge on the card is drawn from this app's push record alone, so in the
+window between you deleting the session in Garmin Connect and you pressing Send again, the card
+goes on claiming the session is there. The push is no longer fooled by that record; the badge
+still reflects it.
+
+The app does not hide the contradiction — on that same screen the day's Garmin panel is drawn
+from the calendar Garmin actually returned, so it will list nothing for that day while the
+badge above it says *"✓ On Garmin"*. **When those two disagree, the Garmin panel is the one
+telling the truth**, and pushing again resolves it. Verified by running it, on a fake account,
+in round 7.
+
+**2. A session dragged across a month boundary in Garmin Connect could be duplicated.** Garmin
+hands its calendar over one month at a time, and this app used to ask only about the month a
+session was recorded in. Drag a workout from Aug 31 to Sep 1 in Garmin Connect — an ordinary
+gesture; the month grid shows you those days side by side — and the next push looked at August,
+found nothing, and sent a second copy. Two sessions on the Edge, the job reporting "done", and
+the original orphaned where nothing here would ever find it again.
+
+It now asks about the month either side as well, which is as far as one drag on a month grid
+can reach. **Still true:** the fan-out stops there, deliberately — each extra read is another
+chance to be rate-limited immediately before a write. A copy dragged more than a month away is
+still out of reach. When a month can't be accounted for, the row names it rather than treating
+it as proof your calendar is clear.
+
+**3. A TrainingPeaks feed regeneration could make pushed workouts refuse to update, forever.**
+If TrainingPeaks regenerates your calendar feed, every session's id changes. This app re-keys
+its records onto the new ids by matching title and date, which is the whole thing standing
+between a regeneration and losing every move you've made. But the ownership tag already written
+on the Garmin workout still spelled the *old* id, so the ownership check stopped recognising
+this app's own work: every later push refused, telling you the session *"carries no marker of
+this app's"* — which was flatly untrue — and advising you, once per workout, to go and delete
+your own synced sessions in Garmin Connect.
+
+Now a marked row counts as this app's when the stored ids point at it, even where the id in the
+tag is one the feed no longer uses, and the push after that settles into an ordinary no-op.
+**Still true:** the re-keying only works when exactly one session in the new feed has the same
+title on the same date. If a regeneration coincides with your coach renaming or moving that
+session, or two sessions on a day share a title, the record is left orphaned rather than
+guessed at — which leaves a copy on your Garmin calendar that nothing here will touch again.
+The app names those on the page; only you can remove them.
+
+### Two-factor authentication stops it at the door
+
+If your Garmin account has 2FA turned on, login fails: the library is given no way to ask you
+for a code, so it stops with *"MFA Required but no prompt_mfa mechanism supplied"*. The app
+still starts and still shows your TrainingPeaks plan — it doesn't crash on a missing source —
+but there is no readiness, no training status, no completed rides and no push at all. Whether
+the failure is reported to you as clearly as "your account has 2FA and this can't handle it"
+is itself untested; expect a generic Garmin login error.
+
+This has never been tried against a real 2FA account, so what's above is read off the code
+rather than observed. `garminconnect` does support an MFA prompt; this app simply doesn't pass
+one, and wiring it up would mean deciding how a web page asks you for a code and what happens
+to a push waiting on it.
+
 ### Undo works over the API but there is no undo button
 
 The server records every change and can reverse one: `GET /api/history` lists them and
@@ -359,9 +580,6 @@ activities do not depend on it.
 - **Your local data is in two places.** `.plan_state.json` holds your moves, blocked days,
   approvals and push records; `state/` holds a cached copy of the plan and the push log. Both
   contain your training data. Keep them out of git and off shared machines.
-- **Garmin is unofficial.** The `garminconnect` library authenticates as you against the same
-  endpoints the Garmin Connect mobile app uses. It's legitimate access to your own account, not
-  bot evasion — but it is not a supported public API, and Garmin can change it without notice.
 
 ---
 
@@ -432,7 +650,7 @@ telling anyone a push is possible.
 | `plan_store.py` | Your local overrides: blocked days, moves, approvals, push records, change history. |
 | `garmin_workout_writer.py` | The only code in this project that sends anything to Garmin. Nothing else in the folder writes to any outside service. |
 | `trainingpeaks_calendar_feed.py` | Reads the ICS feed. Read-only, and the only thing that touches trainingpeaks.com. |
-| `garmin_client.py` | Reads activities, readiness and training status from Garmin. |
+| `garmin_client.py` | Reads activities, readiness and training status from Garmin — and holds the only Garmin login in the project; the writer comes through it too. Its docstring spells out what the login library does. |
 | `trainingpeaks_client.py` | Unused skeleton for the Partner API. Raises if called. |
 | `strava_client.py` | Present, but the calendar doesn't use it. |
 | `alfred_adapter.py` | Glue for an external assistant. |
@@ -441,14 +659,46 @@ telling anyone a push is possible.
 
 ```bash
 cd training-sync
+pip install pytest
 python3 -m pytest -q
 ```
 
-308 tests, all against fakes. They cover the write gates, the ownership rules, the text parser,
-the local store and the API surface. Two of them nail the network shut at the `garminconnect`
-library boundary and assert that a full calendar render, and a full push with the write switch
-actually turned on, make no outbound call at all.
+`pytest` is deliberately not in `requirements.txt` — running the app does not need it — so on
+a fresh install it is the one extra line. Without it, `python3 -m pytest -q` answers *"No
+module named pytest"*.
 
-**They do not prove this works against Garmin.** They prove it behaves correctly against a
-fake that behaves how we *believe* Garmin behaves. That is a different claim, and the
-difference is the whole of the first limitation above.
+334 tests at the time of writing, all against fakes — `pytest -q` prints the real number. They
+cover the write gates, the ownership rules, the text parser, the local store and the API
+surface.
+
+On a fresh clone you will see a handful fewer than that, reported as skips with their reason
+printed: a few compare against an older commit, and two read the live `.plan_state.json`.
+Neither exists in a clean checkout, so they stand aside rather than fail.
+
+**What they establish about the network**, stated exactly, because an earlier version of this
+file claimed more than they showed:
+
+- Every test in `test_garmin_writer.py` — 71 of them, covering the only module that writes to
+  Garmin — runs under an always-on guard that fails the test if anything calls
+  `garminconnect.Garmin`, curl_cffi's session or the libcurl handle under it, `socket.connect`,
+  or `urllib.request.urlopen`. Both layers are needed: `garminconnect` logs in through libcurl,
+  which never touches a Python socket, so a socket-only guard would be watching a door the
+  traffic doesn't use. One test deliberately trips the guard, so it is known to be armed rather
+  than assumed to be.
+- Two tests in `test_web_app.py` run the real HTTP surface against an in-process fake account
+  with `garminconnect.Garmin` and `urllib.request.urlopen` blocked: a full calendar render, and
+  a full push **with the write switch actually turned on**. The push runs to completion — it
+  creates a workout and then moves it, so between them they make every call the writer has
+  (upload, schedule, month read, unschedule) — and neither guard fires.
+
+Those two web tests guard the library constructor and `urlopen`, not the socket, so what they
+show is that no path through the app builds a real Garmin session or opens a URL of its own
+during those flows. The socket-and-libcurl-level guard is the one on the writer's own test
+file. Until this round the second of those two tests did not establish even that much: the
+fake it ran against implemented only two of the calls the writer makes, so the push died on
+its first write hop and the assertion accepted the failure. All it demonstrated was that a
+push which never happens makes no outbound call — and this file cited it for the opposite.
+
+**None of this proves the app works against Garmin.** It proves the app behaves correctly
+against a fake that behaves the way we *believe* Garmin behaves. That is a different claim, and
+the gap between them is the whole of the first limitation above.
