@@ -335,6 +335,21 @@ h1,h2,h3,h4,p{margin:0}
     var(--shadow-lift);
 }
 .card.proposal.unresolved .prop-q{border-color:var(--status-warning)}
+/* A suggestion whose reason has stopped being true. It stays on the calendar
+   so it can be dismissed rather than vanishing unexplained, but it is drawn
+   as spent: the old reason is struck through and Approve is gone, because the
+   sentence under it is no longer something he should act on. */
+.card.proposal.stale{
+  border-style:dotted;border-color:var(--ink-muted);
+  background:color-mix(in srgb,var(--ink-muted) 7%,transparent);
+}
+.card.proposal.stale .prop-reason{text-decoration:line-through;opacity:.6}
+.card.proposal.stale .prop-ops,
+.card.proposal.stale .prop-q{opacity:.6}
+.prop-stale{
+  font-size:12px;font-weight:600;color:var(--ink);background:var(--surface);
+  border:1px solid var(--ink-muted);border-radius:8px;padding:6px 8px;
+}
 .ghost{
   border:1px dashed var(--ink-muted);border-radius:10px;padding:8px 10px;
   opacity:.55;font-size:12px;color:var(--ink-2);background:transparent;
@@ -712,6 +727,12 @@ td.wrap{white-space:normal;min-width:190px}
 
    TrainingPeaks is never written to. Every write below targets the local
    override store or Garmin Connect.
+
+   Sending to Garmin needs three separate consents, and this file must never
+   collapse them: the account is connected (credentials), this machine is
+   allowed to write at all (TRAINING_SYNC_ALLOW_GARMIN_WRITES — surfaced as
+   capabilities.can_write_to_garmin), and that particular session is approved
+   (push_approved). A preview needs none of them and always works.
    ========================================================================= */
 
 const $ = (s, r) => (r || document).querySelector(s);
@@ -985,8 +1006,16 @@ function allUnresolved() {
   return (S.cal.days || []).reduce((a, d) => a.concat(d.unresolved || []), []);
 }
 function selectedPending() {
+  // Decidable means pending *and* still standing: a suggestion whose reason
+  // has gone is refused by the backend, so the keyboard must not offer it
+  // either.
   return allProposals().find(
-    p => p.proposal_id === S.selectedProposal && p.status === "pending") || null;
+    p => p.proposal_id === S.selectedProposal && p.status === "pending"
+      && !p.stale) || null;
+}
+function selectedStale() {
+  return allProposals().find(
+    p => p.proposal_id === S.selectedProposal && p.stale) || null;
 }
 function approvedCount() {
   return allWorkouts().filter(w => w.push_approved && w.status !== "skipped").length;
@@ -995,7 +1024,14 @@ function findWorkout(uid) {
   return allWorkouts().find(w => w.uid === uid) || null;
 }
 const isDemo = () => !!(S.status && S.status.demo) || !!(S.cal && S.cal.demo);
-const canPush = () => !!(S.status && S.status.capabilities && S.status.capabilities.can_push_to_garmin);
+const caps = () => (S.status && S.status.capabilities) || {};
+const canPush = () => !!caps().can_push_to_garmin;
+/* Credentials say a push is possible; the opt-in says it's intended. Both are
+   needed to send for real, and only the preview works without the second. */
+const canWrite = () => !!caps().can_write_to_garmin;
+const writesBlockedReason = () =>
+  (canPush() && !canWrite()) ? (caps().garmin_writes_disabled_reason
+    || "Writing to Garmin is switched off on this machine.") : null;
 
 function toast(msg, kind, action) {
   S.toast = { msg, kind, action, id: Date.now() };
@@ -1143,6 +1179,14 @@ function renderBanners() {
       + "<code>GARMIN_EMAIL</code> and <code>GARMIN_PASSWORD</code> are in <code>training-sync/.env</code>.");
   } else if (src && src.garmin && src.garmin.configured && !src.garmin.ok) {
     banner("bad", "g-warn", "Can't reach Garmin", escapeHtml(src.garmin.message || "Login failed."));
+  }
+  // Connected, but this machine hasn't been told it may write. Standing
+  // notice, not a surprise at the moment of sending.
+  if (writesBlockedReason() && !isDemo()) {
+    banner("warn", "g-info", "Sending to Garmin is switched off",
+      "Nothing here can reach your Garmin account. Previews still work. "
+      + "To enable sending, set <code>TRAINING_SYNC_ALLOW_GARMIN_WRITES=1</code> in "
+      + "<code>training-sync/.env</code> and restart.");
   }
 
   // The richer "isn't connected" banners above already cover these codes —
@@ -1396,7 +1440,8 @@ function workoutCard(w, day) {
 
   // A pending proposal about this workout — flagged here, decided on the
   // dashed card sitting on its target day.
-  const prop = allProposals().find(p => p.uid === w.uid && p.status === "pending");
+  const prop = allProposals().find(
+    p => p.uid === w.uid && p.status === "pending" && !p.stale);
   if (prop && prop.to_date && prop.to_date !== w.date) {
     const strip = el("div", "suggest-strip");
     strip.appendChild(svg("g-spark", "glyph"));
@@ -1461,7 +1506,12 @@ const KIND_HINT = {
 
 function proposalCard(p) {
   const stuck = p.status === "unresolved";
-  const card = el("article", "card proposal" + (stuck ? " unresolved" : ""));
+  // The reason printed on this card is no longer true — he cancelled the trip,
+  // or moved the session himself. It may not be approved, and its old sentence
+  // may not be shown as if it still stood.
+  const stale = !stuck && !!p.stale;
+  const card = el("article", "card proposal" + (stuck ? " unresolved" : "")
+    + (stale ? " stale" : ""));
   if (S.selectedProposal === p.proposal_id) card.classList.add("selected");
   card.tabIndex = 0;
   card.dataset.proposal = p.proposal_id;
@@ -1483,6 +1533,11 @@ function proposalCard(p) {
     (stuck ? "⚠ " : "✦ ") + (KIND_LABEL[kind] || kind.toUpperCase()));
   if (KIND_HINT[kind]) chip.title = KIND_HINT[kind];
   meta.appendChild(chip);
+  if (stale) {
+    const s = el("span", "chip", "No longer applies");
+    s.title = p.stale_reason || "The reason for this suggestion has gone.";
+    meta.appendChild(s);
+  }
   if (p.from_date && p.to_date && p.to_date !== p.from_date) {
     meta.appendChild(el("span", null, shortDay(p.from_date) + " → " + shortDay(p.to_date)));
   } else if (kind === "keep" && p.from_date) {
@@ -1495,7 +1550,13 @@ function proposalCard(p) {
   }
   main.appendChild(meta);
 
-  // The reason, in his language. Mandatory and always rendered.
+  // The reason, in his language. Mandatory and always rendered — but a stale
+  // one is struck through and answered first, so the live sentence on the card
+  // is the true one.
+  if (stale) {
+    main.appendChild(el("div", "prop-stale",
+      p.stale_reason || "The reason for this suggestion has gone."));
+  }
   main.appendChild(el("div", "prop-reason", p.rationale || "No reason given."));
 
   // A swap moves two sessions. Both are listed here, because approving is one
@@ -1525,6 +1586,19 @@ function proposalCard(p) {
     leave.title = "Keeps the clash on the calendar so you can decide later.";
     leave.onclick = ev => { ev.stopPropagation(); toast("Left as it is — it stays flagged until something changes."); };
     acts.appendChild(skip); acts.appendChild(leave);
+  } else if (stale) {
+    // No Approve at all: the backend refuses it, and offering a button that
+    // can only fail is worse than not offering one.
+    const no = el("button", "btn sm", "✕ Dismiss");
+    no.title = "Takes this spent suggestion off the calendar.";
+    no.onclick = ev => { ev.stopPropagation(); rejectProposal(p); };
+    const again = el("button", "btn sm accent", "Ask again");
+    again.title = "Re-plans this week against how it looks now.";
+    again.onclick = ev => {
+      ev.stopPropagation();
+      requestProposals("manual", p.from_date || p.to_date);
+    };
+    acts.appendChild(no); acts.appendChild(again);
   } else {
     const isKeep = kind === "keep";
     const ok = el("button", "btn sm accent", isKeep ? "✓ Got it" : "✓ Approve");
@@ -1600,7 +1674,9 @@ function monthCell(date, inMonth, isToday) {
   });
   const extra = ((day && day.workouts) || []).length - 3;
   if (extra > 0) cell.appendChild(el("div", "loadlab", "+" + extra + " more"));
-  if (day && (day.proposals || []).some(p => p.status === "pending")) {
+  // A spent suggestion earns no "suggested" dot: at month zoom the dot *is*
+  // the whole message, and there is no room to qualify it.
+  if (day && (day.proposals || []).some(p => p.status === "pending" && !p.stale)) {
     const c = el("div", "mchip");
     c.style.background = "var(--accent-wash)";
     c.style.color = "var(--accent)";
@@ -1801,7 +1877,16 @@ function rationalePanel(p) {
   const heading = p.status === "unresolved" ? "Why nothing fits"
     : (p.kind === "keep" ? "Why this stays put" : "Why this move?");
   box.appendChild(el("div", "tile-h", heading));
-  box.appendChild(el("div", "tile-sub", p.rationale || ""));
+  // The "why" panel is the one place that spells the reasoning out in full,
+  // so it is also where a reason that has stopped being true must say so
+  // first — before the sentence it invalidates.
+  if (p.stale) {
+    box.appendChild(el("div", "prop-stale",
+      p.stale_reason || "The reason for this suggestion has gone."));
+  }
+  const reason = el("div", "tile-sub", p.rationale || "");
+  if (p.stale) { reason.style.textDecoration = "line-through"; reason.style.opacity = ".6"; }
+  box.appendChild(reason);
 
   (p.rationale_details || []).forEach(d => {
     const s = el("div", "tile-sub");
@@ -2196,7 +2281,7 @@ async function requestProposals(reason, focusDate) {
       method: "POST", body: { start: r.start, end: r.end, reason: reason || "manual" }
     });
     await loadAll();
-    const n = (res.proposals || []).length;
+    const n = (res.proposals || []).filter(p => !p.stale).length;
     const unresolved = (res.unresolved || []).length;
     const stuckNote = unresolved === 1
       ? " One session he couldn't place is flagged in amber."
@@ -2227,6 +2312,13 @@ async function approveProposal(p, quiet) {
       toast("Approved. It's on your calendar — hit Push when you want it on the Edge.");
     }
   } catch (e) {
+    if (e.code === "proposal_stale") {
+      // Not a conflict to force through — the reason itself has gone. Redraw
+      // so the card shows as spent instead of leaving a dead button.
+      await loadAll();
+      toast(e.message, "bad");
+      return;
+    }
     if (e.code === "proposal_conflict") {
       toast(e.message, "bad", {
         label: "Use Alfred's version",
@@ -2296,6 +2388,19 @@ function pushDrawer() {
   const p = S.pushPreview || {};
   const job = S.pushJob || p.job;
 
+  // Writes are opt-in per machine. Say so up front, in the drawer whose whole
+  // purpose is writing, rather than letting Send fail with a code.
+  const off = writesBlockedReason();
+  if (off) {
+    const bn = el("div", "banner warn");
+    bn.appendChild(svg("g-warn", null));
+    const c = el("div");
+    c.appendChild(el("span", "bt", "Sending to Garmin is switched off"));
+    c.appendChild(document.createTextNode(off));
+    bn.appendChild(c);
+    b.appendChild(bn);
+  }
+
   if (p.loading) {
     b.appendChild(el("div", "tile-sub", "Working out what would be sent…"));
   } else if (p.error) {
@@ -2330,6 +2435,25 @@ function pushDrawer() {
       }
       b.appendChild(row);
     });
+
+    // Approving a change and sending it are two separate consents, so a
+    // session that wasn't approved is never sent. It is listed above with its
+    // reason; this is the count, so "I asked for the week and four went" is
+    // never a silent answer.
+    const held = (job.not_approved || {}).count || 0;
+    if (held) {
+      const bn = el("div", "banner");
+      bn.appendChild(svg("g-warn", null));
+      const c = el("div");
+      c.appendChild(el("span", "bt", held === 1
+        ? "1 session wasn't sent — you haven't approved it"
+        : held + " sessions weren't sent — you haven't approved them"));
+      c.appendChild(document.createTextNode(
+        "Approving a change and sending it to the Edge are two separate steps. "
+        + "Use a workout's ⋮ menu → “Approve for push” to include it."));
+      bn.appendChild(c);
+      b.appendChild(bn);
+    }
 
     if (job.state === "running" || job.state === "queued") {
       const pr = el("div", "banner");
@@ -2375,9 +2499,12 @@ function pushDrawer() {
   cancel.onclick = () => { S.drawer = null; render(); };
   const send = el("button", "btn primary", "Send to Garmin");
   const running = job && (job.state === "running" || job.state === "queued");
-  send.disabled = !job || !job.items || !job.items.length || running
-    || (job && !job.dry_run) || !canPush();
+  const sendable = job && (job.items || []).some(i => i.state !== "skipped");
+  send.disabled = !sendable || running || (job && !job.dry_run)
+    || !canPush() || !canWrite();
   if (!canPush()) send.title = "Garmin isn't connected — add your login to .env to send for real.";
+  else if (!canWrite()) send.title = writesBlockedReason();
+  else if (!sendable) send.title = "Nothing here is approved and due to be sent.";
   send.onclick = () => confirmPush();
   f.appendChild(cancel);
   f.appendChild(el("span", "spacer"));
@@ -2410,6 +2537,11 @@ async function confirmPush() {
     if (e.code === "push_in_flight" && e.detail && e.detail.job_id) {
       pollPush(e.detail.job_id);
       return;
+    }
+    if (e.code === "writes_disabled") {
+      // Refresh capabilities so the drawer redraws with the banner and a
+      // disabled Send, instead of leaving a button that can only fail.
+      try { S.status = await api("/api/status"); } catch (ignored) { /* keep the old one */ }
     }
     S.pushPreview = Object.assign({}, S.pushPreview, { error: e });
     render();
@@ -2530,7 +2662,10 @@ document.addEventListener("keydown", ev => {
   // Only a *pending* proposal is decidable — an unplaceable session has
   // nothing to approve or reject, so the shortcuts skip it.
   else if (k === "a") { const p = selectedPending(); if (p) approveProposal(p); }
-  else if (k === "r") { const p = selectedPending(); if (p) rejectProposal(p); }
+  else if (k === "r") {
+    const p = selectedPending() || selectedStale();
+    if (p) rejectProposal(p);
+  }
   else if (ev.key === "?") { S.drawer = "help"; render(); }
 });
 

@@ -16,6 +16,14 @@ Design rules that the rest of the app depends on:
 - A re-fetch never destroys an override. If a uid disappears from the feed
   the override is marked *orphaned*, not deleted (and we try to re-key it by
   fingerprint first, in case TrainingPeaks regenerated its UIDs).
+- The Garmin push identity is *not* an override. It lives in its own
+  top-level map (`garmin_push`), keyed by the same uid, because it is not
+  the user's data: it is this app's only handle on the copy already sitting
+  on the Garmin calendar. Keeping it inside the override record meant every
+  user-facing edit — undo, revert, patch — could clobber it, and one that
+  did left a duplicate on the Edge 520 that nothing here could remove. The
+  two maps are written by two disjoint sets of methods and no user-edit
+  method touches the push map at all.
 - Writes are atomic: serialize to a temp file in the same directory, fsync,
   then os.replace(). A crash mid-write can never leave a torn state file.
 - Every mutation appends to an audit log so the last change per workout can
@@ -39,7 +47,9 @@ from datetime import datetime, timezone
 DEFAULT_STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                   ".plan_state.json")
 
-SCHEMA_VERSION = 1
+# v2 lifted the Garmin push identity out of every override record and into
+# its own top-level map. `_migrate` carries a v1 file forward on load.
+SCHEMA_VERSION = 2
 HISTORY_LIMIT = 500
 
 AVAILABILITY_STATES = ("available", "unavailable", "limited")
@@ -51,6 +61,21 @@ PROPOSAL_STATUSES = ("pending", "approved", "rejected")
 OVERRIDABLE_FIELDS = (
     "date", "status", "title", "description",
     "duration_s", "sport", "push_approved",
+)
+
+# The only keys an override record may carry. Anything else — most of all a
+# Garmin block smuggled in by an old history snapshot — is dropped on the way
+# in, so the two maps cannot re-couple by accident.
+OVERRIDE_KEYS = (
+    "uid", "kind", "rev", "created_at", "updated_at",
+    "note", "fields", "plan_snapshot", "orphaned_since",
+)
+
+# The Garmin-facing half. `plan_snapshot` rides along so a push-only record
+# still knows which session it belongs to after the feed drops the uid.
+PUSH_KEYS = (
+    "workout_id", "schedule_id", "scheduled_for",
+    "pushed_at", "pushed_hash", "push_state", "error",
 )
 
 # Days a uid must be continuously missing from the feed before auto-prune
@@ -99,6 +124,18 @@ class UnknownProposal(PlanStoreError):
     code = "unknown_proposal"
 
 
+class PushIdentityConflict(PlanStoreError):
+    """Two workouts tried to claim one id on the Garmin calendar.
+
+    A schedule id identifies a single row on that calendar. If two uids both
+    believed they owned it, unscheduling one would silently remove the other
+    from the athlete's day. Unreachable by construction now that adoption is
+    ownership-proven — this is the tripwire that keeps it that way.
+    """
+
+    code = "push_identity_conflict"
+
+
 class InvalidValue(PlanStoreError):
     code = "invalid_value"
 
@@ -140,10 +177,110 @@ def _empty_state():
         "updated_at": _now(),
         "day_availability": {},
         "workout_overrides": {},
+        "garmin_push": {},
         "proposals": [],
         "rejected_signatures": [],
         "history": [],
     }
+
+
+def _blank_push(uid):
+    return {
+        "uid": uid,
+        "workout_id": None,
+        "schedule_id": None,
+        "scheduled_for": None,
+        "pushed_at": None,
+        "pushed_hash": None,
+        "push_state": "never",
+        "error": None,
+        "plan_snapshot": None,
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+
+
+def _push_view(entry):
+    """The Garmin block as the rest of the app reads it."""
+    entry = entry or {}
+    return {key: entry.get(key) for key in PUSH_KEYS} if entry else None
+
+
+def _holds_a_copy(entry):
+    """True when Garmin is holding something of ours for this uid."""
+    entry = entry or {}
+    return entry.get("workout_id") is not None \
+        or entry.get("schedule_id") is not None
+
+
+def _override_only(record):
+    """Strip a record down to the user's half.
+
+    Every write into `workout_overrides` goes through here, so a stale
+    history snapshot from before the split — or any other record that still
+    carries a `garmin` block — cannot put push identity back into the edit
+    layer. This is what makes "an edit cannot touch the ids" structural
+    rather than a rule someone has to remember.
+    """
+    record = record or {}
+    out = {key: copy.deepcopy(record[key])
+           for key in OVERRIDE_KEYS if key in record}
+    if not isinstance(out.get("fields"), dict):
+        out["fields"] = {}
+    return out
+
+
+def _migrate(data):
+    """Carry a v1 state file forward: lift `garmin` out of every override.
+
+    v1 kept the push identity inside the override record and, once an
+    override had been cleared, kept a bare "tombstone" record alive purely to
+    hold it. Both become a plain entry in `garmin_push`; a tombstone has
+    nothing else in it, so nothing of it remains in the edit layer.
+
+    Nothing is dropped that the app can still use, and history is left
+    exactly as written — it is an audit log, not state.
+    """
+    overrides = data.get("workout_overrides")
+    if not isinstance(overrides, dict):
+        overrides = {}
+    push = data.get("garmin_push")
+    if not isinstance(push, dict):
+        push = {}
+
+    for uid, record in list(overrides.items()):
+        if not isinstance(record, dict):
+            overrides.pop(uid, None)
+            continue
+        legacy = record.pop("garmin", None)
+        was_tombstone = bool(record.pop("tombstone", False))
+
+        if isinstance(legacy, dict) and uid not in push:
+            entry = _blank_push(uid)
+            for key in PUSH_KEYS:
+                if legacy.get(key) is not None:
+                    entry[key] = legacy[key]
+            entry["plan_snapshot"] = copy.deepcopy(record.get("plan_snapshot"))
+            entry["created_at"] = record.get("created_at") or entry["created_at"]
+            entry["updated_at"] = record.get("updated_at") or entry["updated_at"]
+            # A never-pushed record has no identity worth carrying over.
+            if _holds_a_copy(entry) or entry["push_state"] != "never":
+                push[uid] = entry
+
+        if was_tombstone and not record.get("fields"):
+            overrides.pop(uid, None)
+        else:
+            overrides[uid] = _override_only(record)
+
+    for uid, entry in list(push.items()):
+        if not isinstance(entry, dict):
+            push.pop(uid, None)
+            continue
+        entry.setdefault("uid", uid)
+
+    data["workout_overrides"] = overrides
+    data["garmin_push"] = push
+    return data
 
 
 class PlanStore:
@@ -192,13 +329,15 @@ class PlanStore:
 
             base = _empty_state()
             base.update(data)
-            base["schema_version"] = SCHEMA_VERSION
-            for key in ("day_availability", "workout_overrides"):
+            for key in ("day_availability", "workout_overrides", "garmin_push"):
                 if not isinstance(base.get(key), dict):
                     base[key] = {}
             for key in ("proposals", "rejected_signatures", "history"):
                 if not isinstance(base.get(key), list):
                     base[key] = []
+            # Migrate on the file's own shape, before stamping the version.
+            _migrate(base)
+            base["schema_version"] = SCHEMA_VERSION
             self._state = base
             return self._state
 
@@ -276,6 +415,10 @@ class PlanStore:
             return {
                 "path": self.path,
                 "override_count": len(overrides),
+                "pushed_count": sum(
+                    1 for entry in self._state["garmin_push"].values()
+                    if _holds_a_copy(entry)
+                ),
                 "orphan_count": sum(
                     1 for rec in overrides.values()
                     if rec.get("orphaned_since")
@@ -396,11 +539,14 @@ class PlanStore:
                 current = self._state["workout_overrides"].get(uid)
                 if before is None:
                     # The entry created the override, so undoing it removes
-                    # the override — but not the record of what is already on
-                    # Garmin. Same reasoning as clear_override.
-                    self._drop_override_locked(uid)
+                    # the override. What is already on Garmin is not in this
+                    # map and is therefore not at risk.
+                    self._state["workout_overrides"].pop(uid, None)
                 else:
-                    restored = copy.deepcopy(before)
+                    # `before` may be a pre-split snapshot carrying a stale
+                    # `garmin` block. _override_only drops it: an undo restores
+                    # the user's edit and nothing else, ever.
+                    restored = _override_only(before)
                     # Keep rev monotonic so stale-rev checks stay meaningful.
                     if current:
                         restored["rev"] = int(current.get("rev", 0)) + 1
@@ -410,9 +556,9 @@ class PlanStore:
                                      self._state["workout_overrides"].get(uid),
                                      undoable=False)
             self._save_locked()
-            return self._state["workout_overrides"].get(uid) if not \
-                action.startswith("availability") else \
-                self._state["day_availability"].get(uid)
+            if action.startswith("availability"):
+                return self._state["day_availability"].get(uid)
+            return self.get_override(uid)
 
     # ---------- day availability ----------
 
@@ -496,14 +642,54 @@ class PlanStore:
 
     # ---------- workout overrides ----------
 
+    def _projected_locked(self, uid):
+        """The override as callers read it: the user's record with a
+        read-only view of the Garmin push attached.
+
+        The `garmin` key here is a *projection*. It is assembled on the way
+        out and never stored, so writing a projected record back through any
+        edit method cannot carry push identity with it.
+
+        A uid with no override but a live copy on Garmin still projects — as
+        an empty override — because the app has to keep showing the athlete
+        the session it can still remove from their calendar. When the copy
+        goes (unpush), so does the record: unlike the tombstone it replaces,
+        this state always has an exit.
+        """
+        record = self._state["workout_overrides"].get(uid)
+        entry = self._state["garmin_push"].get(uid)
+        if record is None:
+            if not _holds_a_copy(entry):
+                return None
+            record = {
+                "uid": uid,
+                "kind": "system",
+                "rev": 0,
+                "created_at": entry.get("created_at"),
+                "updated_at": entry.get("updated_at"),
+                "note": None,
+                "fields": {},
+                "plan_snapshot": copy.deepcopy(entry.get("plan_snapshot")),
+                "orphaned_since": None,
+                "push_only": True,
+            }
+        else:
+            record = copy.deepcopy(record)
+        record["garmin"] = _push_view(entry) or _push_view(_blank_push(uid))
+        return record
+
     def get_override(self, uid):
         with self._lock:
-            record = self._state["workout_overrides"].get(uid)
-            return copy.deepcopy(record) if record else None
+            return self._projected_locked(uid)
 
     def all_overrides(self):
         with self._lock:
-            return copy.deepcopy(self._state["workout_overrides"])
+            uids = list(self._state["workout_overrides"])
+            uids += [uid for uid in self._state["garmin_push"]
+                     if uid not in self._state["workout_overrides"]]
+            projected = ((uid, self._projected_locked(uid)) for uid in uids)
+            return {uid: record for uid, record in projected
+                    if record is not None}
 
     def has_override(self, uid):
         with self._lock:
@@ -524,15 +710,6 @@ class PlanStore:
             "note": None,
             "fields": {},
             "plan_snapshot": copy.deepcopy(plan_snapshot) if plan_snapshot else None,
-            "garmin": {
-                "workout_id": None,
-                "schedule_id": None,
-                "scheduled_for": None,
-                "pushed_at": None,
-                "pushed_hash": None,
-                "push_state": "never",
-                "error": None,
-            },
             "orphaned_since": None,
         }
 
@@ -619,24 +796,19 @@ class PlanStore:
             elif kind == "alfred" and record.get("kind") != "user":
                 record["kind"] = "alfred"
 
-            # An edit revives a record that a cleared override had reduced to
-            # a bare Garmin tombstone: there is something of the user's on it
-            # again, so clear_override has real work to do next time.
-            record.pop("tombstone", None)
-
             record["rev"] = int(record.get("rev", 0)) + 1
             record["updated_at"] = _now()
 
             # Local state changed after a successful push -> drifted, so the
             # UI can prompt a re-push instead of quietly disagreeing with
-            # what is actually on the device.
-            garmin = record.get("garmin") or {}
-            if garmin.get("push_state") == "scheduled":
-                relevant = {"date", "title", "description", "duration_s", "sport"}
-                if relevant & set(fields):
-                    garmin["push_state"] = "drifted"
-                    record["garmin"] = garmin
+            # what is actually on the device. This is the one thing an edit
+            # says to the push record, and `_mark_drift_locked` can only set
+            # a state — it has no way to reach an id.
+            relevant = {"date", "title", "description", "duration_s", "sport"}
+            if relevant & set(fields):
+                self._mark_drift_locked(uid)
 
+            record = _override_only(record)
             self._state["workout_overrides"][uid] = record
             self._append_history(action, uid, actor, before, record)
             self._save_locked()
@@ -673,73 +845,25 @@ class PlanStore:
                                   expected_rev=expected_rev, actor=actor,
                                   action="push_approve")
 
-    @staticmethod
-    def _is_tombstone(record):
-        """A record that holds nothing but the Garmin push identity."""
-        return bool(record) and bool(record.get("tombstone")) \
-            and not record.get("fields")
-
-    def _tombstone_for(self, uid, record):
-        """The residue of a dropped override: its Garmin ids and nothing else.
-
-        Returns None when there is nothing worth keeping, i.e. the workout was
-        never pushed, in which case the record really can go.
-        """
-        garmin = copy.deepcopy(record.get("garmin") or {})
-        if garmin.get("workout_id") is None and garmin.get("schedule_id") is None:
-            return None
-        tombstone = self._blank_override(uid, "system",
-                                         record.get("plan_snapshot"))
-        tombstone["garmin"] = garmin
-        tombstone["created_at"] = record.get("created_at") \
-            or tombstone["created_at"]
-        # Keep rev monotonic: an open editor still has to fail its stale-rev
-        # check after the override was cleared out from under it.
-        tombstone["rev"] = int(record.get("rev", 0)) + 1
-        tombstone["updated_at"] = _now()
-        tombstone["orphaned_since"] = record.get("orphaned_since")
-        tombstone["tombstone"] = True
-        return tombstone
-
-    def _drop_override_locked(self, uid):
-        """Remove a workout override, leaving a tombstone when Garmin holds a
-        copy. Returns whatever is left behind (None when the uid was dropped).
-
-        The push ids are not part of the user's edit — they are this app's
-        only handle on the session already sitting on the Garmin calendar.
-        Discarding them makes the next push take the `create` path and stack a
-        second copy on the Edge 520 that nothing here could ever remove.
-        """
-        record = self._state["workout_overrides"].get(uid)
-        if record is None:
-            return None
-        tombstone = self._tombstone_for(uid, record)
-        if tombstone is None:
-            self._state["workout_overrides"].pop(uid, None)
-            return None
-        self._state["workout_overrides"][uid] = tombstone
-        return tombstone
-
     def clear_override(self, uid, actor="user"):
         """Drop the whole override, reverting to the coach's plan.
 
-        Idempotent. Deliberately does *not* touch Garmin: if the workout was
-        already pushed, the record's push info is retained on a tombstone so
-        the caller can still unschedule it, and the UI can prompt to re-push.
+        Idempotent. Deliberately does *not* touch Garmin: the push identity
+        lives in its own map, so the caller can still unschedule the copy on
+        the calendar and the UI can still prompt to re-push. Nothing is left
+        behind here — v1 kept a "tombstone" record alive to hold the ids and
+        that record had no way out; there is no longer anything to hold.
         """
         with self._lock:
-            record = self._state["workout_overrides"].get(uid)
+            record = self._state["workout_overrides"].pop(uid, None)
             if record is None:
                 return None
-            if self._is_tombstone(record):
-                # Nothing of the user's left to clear; what remains is the
-                # Garmin identity, which was never theirs to revert.
-                return copy.deepcopy(record)
             before = copy.deepcopy(record)
-            after = self._drop_override_locked(uid)
-            self._append_history("clear_override", uid, actor, before, after)
+            self._append_history("clear_override", uid, actor, before, None)
             self._save_locked()
-            return copy.deepcopy(before)
+            before["garmin"] = _push_view(self._state["garmin_push"].get(uid)) \
+                or _push_view(_blank_push(uid))
+            return before
 
     def approved_for_push(self, uids=None):
         """Uids explicitly marked push_approved. Explicit selection is the
@@ -756,11 +880,52 @@ class PlanStore:
     # ---------- push status ----------
 
     def get_push(self, uid):
+        """What Garmin is holding for this uid, or None if nothing ever was.
+
+        Read straight off `garmin_push` — no override record is needed and
+        none is consulted, so a workout the user has never edited is just as
+        knowable as one they have.
+        """
         with self._lock:
-            record = self._state["workout_overrides"].get(uid)
-            if not record:
-                return None
-            return copy.deepcopy(record.get("garmin"))
+            entry = self._state["garmin_push"].get(uid)
+            return _push_view(entry) if entry else None
+
+    def all_pushes(self):
+        with self._lock:
+            return {uid: _push_view(entry)
+                    for uid, entry in self._state["garmin_push"].items()}
+
+    def _mark_drift_locked(self, uid):
+        """Say "the plan moved away from what is on the device".
+
+        A state, not an identity: this is the only thing the edit surface can
+        say to the push record, and it cannot say anything about an id.
+        """
+        entry = self._state["garmin_push"].get(uid)
+        if entry and entry.get("push_state") == "scheduled":
+            entry["push_state"] = "drifted"
+            entry["updated_at"] = _now()
+
+    def _check_id_ownership_locked(self, uid, workout_id, schedule_id):
+        """Refuse an id another uid already claims.
+
+        Change 2(c). Two uids on one schedule id means unscheduling either
+        one removes the other's session from the athlete's calendar.
+        """
+        for other, entry in self._state["garmin_push"].items():
+            if other == uid:
+                continue
+            if schedule_id is not None \
+                    and entry.get("schedule_id") == schedule_id:
+                raise PushIdentityConflict(
+                    f"Garmin schedule {schedule_id} is already recorded "
+                    f"against {other!r}; two workouts cannot share one "
+                    "calendar entry")
+            if workout_id is not None \
+                    and entry.get("workout_id") == workout_id:
+                raise PushIdentityConflict(
+                    f"Garmin workout {workout_id} is already recorded "
+                    f"against {other!r}")
 
     def record_push(self, uid, workout_id=UNSET, schedule_id=UNSET,
                     scheduled_for=UNSET, pushed_hash=UNSET,
@@ -786,62 +951,56 @@ class PlanStore:
             _validate_date(scheduled_for, "scheduled_for")
 
         with self._lock:
-            record = self._state["workout_overrides"].get(uid)
-            before = copy.deepcopy(record)
-            if record is None:
-                record = self._blank_override(uid, "system", plan_snapshot)
-            else:
-                record = copy.deepcopy(record)
+            entry = self._state["garmin_push"].get(uid)
+            before = copy.deepcopy(entry)
+            entry = copy.deepcopy(entry) if entry else _blank_push(uid)
 
-            garmin = record.get("garmin") or {}
             if workout_id is not UNSET:
-                garmin["workout_id"] = workout_id
+                entry["workout_id"] = workout_id
             if schedule_id is not UNSET:
-                garmin["schedule_id"] = schedule_id
+                entry["schedule_id"] = schedule_id
             if scheduled_for is not UNSET:
-                garmin["scheduled_for"] = scheduled_for
+                entry["scheduled_for"] = scheduled_for
             if pushed_hash is not UNSET:
-                garmin["pushed_hash"] = pushed_hash
-            garmin["push_state"] = push_state
-            garmin["error"] = error
+                entry["pushed_hash"] = pushed_hash
+            entry["push_state"] = push_state
+            entry["error"] = error
             if push_state == "scheduled":
-                garmin["pushed_at"] = _now()
-            record["garmin"] = garmin
-            record["updated_at"] = _now()
+                entry["pushed_at"] = _now()
+            if plan_snapshot is not None:
+                entry["plan_snapshot"] = copy.deepcopy(plan_snapshot)
+            entry["updated_at"] = _now()
 
-            self._state["workout_overrides"][uid] = record
-            self._append_history("push", uid, actor, before, record,
+            # Validate before writing, so a refused push leaves no residue.
+            self._check_id_ownership_locked(uid, entry.get("workout_id"),
+                                            entry.get("schedule_id"))
+
+            self._state["garmin_push"][uid] = entry
+            self._append_history("push", uid, actor, before, entry,
                                  undoable=False)
             self._save_locked()
-            return copy.deepcopy(garmin)
+            return _push_view(entry)
 
     def mark_push_failed(self, uid, error, actor="system"):
         return self.record_push(uid, push_state="failed", error=str(error),
                                 actor=actor)
 
     def clear_push(self, uid, actor="system"):
-        """Forget Garmin ids for a uid (after unscheduling/deleting)."""
+        """Forget Garmin ids for a uid, after it has been unscheduled.
+
+        The entry goes entirely rather than being blanked in place. A record
+        holding nothing is exactly the state v1's tombstone got stuck in, and
+        the only honest answer to "is anything of ours on Garmin?" once the
+        calendar entry is gone is "no record at all".
+        """
         with self._lock:
-            record = self._state["workout_overrides"].get(uid)
-            if not record:
+            entry = self._state["garmin_push"].pop(uid, None)
+            if entry is None:
                 return None
-            before = copy.deepcopy(record)
-            record = copy.deepcopy(record)
-            record["garmin"] = {
-                "workout_id": None,
-                "schedule_id": None,
-                "scheduled_for": None,
-                "pushed_at": None,
-                "pushed_hash": None,
-                "push_state": "never",
-                "error": None,
-            }
-            record["updated_at"] = _now()
-            self._state["workout_overrides"][uid] = record
-            self._append_history("push_clear", uid, actor, before, record,
+            self._append_history("push_clear", uid, actor, entry, None,
                                  undoable=False)
             self._save_locked()
-            return copy.deepcopy(record["garmin"])
+            return None
 
     def pushed_uids(self):
         """Uids this app has scheduled on Garmin. The push flow must never
@@ -849,9 +1008,9 @@ class PlanStore:
         Garmin Connect directly are not ours to touch."""
         with self._lock:
             return {
-                uid: copy.deepcopy(rec["garmin"])
-                for uid, rec in self._state["workout_overrides"].items()
-                if (rec.get("garmin") or {}).get("workout_id") is not None
+                uid: _push_view(entry)
+                for uid, entry in self._state["garmin_push"].items()
+                if entry.get("workout_id") is not None
             }
 
     # ---------- orphans ----------
@@ -912,7 +1071,9 @@ class PlanStore:
                 if uid:
                     plan_by_uid[uid] = entry
 
-            claimed = set(self._state["workout_overrides"]) & set(plan_by_uid)
+            known = set(self._state["workout_overrides"]) \
+                | set(self._state["garmin_push"])
+            claimed = known & set(plan_by_uid)
 
             # Fingerprint -> unclaimed plan uids
             by_fp = {}
@@ -925,16 +1086,20 @@ class PlanStore:
                 by_fp.setdefault(fp, []).append(uid)
 
             rekeyed = []
-            for old_uid in list(self._state["workout_overrides"]):
+            for old_uid in list(dict.fromkeys(known)):
+                record = self._state["workout_overrides"].get(old_uid)
+                push = self._state["garmin_push"].get(old_uid)
+
                 if old_uid in plan_by_uid:
                     # Still present upstream; make sure it isn't flagged.
-                    rec = self._state["workout_overrides"][old_uid]
-                    if rec.get("orphaned_since"):
-                        rec["orphaned_since"] = None
+                    if record and record.get("orphaned_since"):
+                        record["orphaned_since"] = None
                     continue
 
-                record = self._state["workout_overrides"][old_uid]
-                snapshot = record.get("plan_snapshot") or {}
+                # A push-only uid keeps its own copy of the plan snapshot, so
+                # a re-keyed feed can still find the session Garmin holds.
+                snapshot = (record or {}).get("plan_snapshot") \
+                    or (push or {}).get("plan_snapshot") or {}
                 fp = snapshot.get("fingerprint")
                 if not fp and snapshot:
                     fp = fingerprint(snapshot.get("title"),
@@ -944,19 +1109,29 @@ class PlanStore:
                 if len(candidates) == 1:
                     new_uid = candidates[0]
                     before = copy.deepcopy(record)
-                    moved = copy.deepcopy(record)
-                    moved["uid"] = new_uid
-                    moved["orphaned_since"] = None
-                    moved["updated_at"] = _now()
-                    del self._state["workout_overrides"][old_uid]
-                    self._state["workout_overrides"][new_uid] = moved
+                    moved = None
+                    if record is not None:
+                        moved = copy.deepcopy(record)
+                        moved["uid"] = new_uid
+                        moved["orphaned_since"] = None
+                        moved["updated_at"] = _now()
+                        del self._state["workout_overrides"][old_uid]
+                        self._state["workout_overrides"][new_uid] = moved
+                    if push is not None:
+                        # The push identity follows the workout to its new
+                        # uid. Left behind, the app loses its only handle on
+                        # the copy already on the Garmin calendar and the
+                        # next push stacks a duplicate beside it.
+                        moved_push = copy.deepcopy(push)
+                        moved_push["uid"] = new_uid
+                        del self._state["garmin_push"][old_uid]
+                        self._state["garmin_push"][new_uid] = moved_push
                     by_fp[fp] = []
                     self._append_history("rekey", new_uid, actor, before,
                                          moved, undoable=False)
                     rekeyed.append((old_uid, new_uid))
-                else:
-                    if not record.get("orphaned_since"):
-                        record["orphaned_since"] = _now()
+                elif record is not None and not record.get("orphaned_since"):
+                    record["orphaned_since"] = _now()
 
             self._save_locked()
             return rekeyed
@@ -1165,6 +1340,7 @@ if __name__ == "__main__":
     print(f"  writable:   {stats['writable']}")
     print(f"  overrides:  {stats['override_count']} "
           f"({stats['orphan_count']} orphaned)")
+    print(f"  on garmin:  {stats['pushed_count']}")
     print(f"  day rules:  {stats['availability_count']}")
     print(f"  proposals:  {stats['pending_proposals']} pending")
     if stats["load_error"]:

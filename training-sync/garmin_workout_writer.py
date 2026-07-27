@@ -14,6 +14,20 @@ Two things about the underlying `garminconnect` API drive the design:
 - `get_scheduled_workouts(year, month)` is month-keyed, so looking up an
   existing schedule means fanning out over the months a range spans.
 
+Two rules govern everything this module writes:
+
+- It never destroys anything. There is no `delete` here at all: rewriting a
+  session uploads a new template and unschedules the old calendar entry,
+  leaving the superseded template in the athlete's Garmin library where it
+  is harmless. A workout template is cheap; one the athlete built by hand
+  and lost is not.
+- It only claims a workout it can prove it wrote. Every workout created here
+  carries an ownership marker keyed to the plan uid (`push_marker`), and the
+  adopt path matches on that marker alone. Names repeat weekly and two
+  sessions can share a title on one day, so a name proves nothing — matching
+  on one is how this app came to adopt, and then overwrite, workouts that
+  were never its own.
+
 Credentials are read lazily. Importing this module never touches the
 network or the environment, so the web layer can start and report "Garmin
 not configured" rather than failing at import.
@@ -23,6 +37,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -99,6 +114,66 @@ ZONE_NUMBER = {
     "anaerobic": 6, "z6": 6,
     "neuromuscular": 7, "z7": 7,
 }
+
+
+# --- ownership marker -------------------------------------------------------
+# Garmin's calendar tells us a workout's name, its ids and its date. None of
+# that distinguishes a session this app created from one the athlete built by
+# hand, and the two need very different treatment: ours may be rewritten and
+# unscheduled, theirs may not be touched at all.
+#
+# So every workout created here carries a marker in its name, derived from the
+# plan uid. It is the only evidence of authorship that survives a round trip
+# through Garmin, and it is per-uid, so it cannot merge two sessions that
+# happen to share a title on one day.
+#
+# Absence of a marker is never treated as permission. An unmarked workout is
+# somebody else's: we create our own beside it rather than claim it.
+
+PUSH_MARKER_PREFIX = "ts"
+MARKER_RE = re.compile(r"\[" + PUSH_MARKER_PREFIX + r":[0-9a-f]{8}\]")
+MAX_WORKOUT_NAME = 80
+
+
+def push_marker(uid):
+    """The ownership marker this app writes for `uid`.
+
+    A short digest rather than the raw uid: ICS uids are long and ugly, and
+    this ends up on the athlete's head unit.
+    """
+    token = hashlib.sha1(
+        f"training-sync|{uid}".encode("utf-8")).hexdigest()[:8]
+    return f"[{PUSH_MARKER_PREFIX}:{token}]"
+
+
+def marked_workout_name(title, uid, limit=MAX_WORKOUT_NAME):
+    """The workout name as it goes to Garmin: the title plus our marker.
+
+    The title is truncated rather than the marker — a clipped name is a
+    cosmetic problem, a clipped marker is a workout we can no longer prove is
+    ours and would therefore abandon on the calendar.
+    """
+    marker = push_marker(uid)
+    base = " ".join(str(title or "").split()) or "Workout"
+    room = limit - len(marker) - 1
+    if room < 1:
+        return marker[:limit]
+    return f"{base[:room].rstrip()} {marker}"
+
+
+def owns_workout(name, uid):
+    """True only when `name` carries the marker this app writes for `uid`."""
+    return push_marker(uid) in str(name or "")
+
+
+def strip_marker(name):
+    """The name with any ownership marker removed, for showing a person.
+
+    The marker is bookkeeping. Anywhere a workout name read back off the
+    Garmin calendar is displayed, put it through here first — the athlete
+    should see the title their coach wrote, not our tag.
+    """
+    return MARKER_RE.sub("", str(name or "")).strip() or None
 
 
 class GarminWriterError(Exception):
@@ -437,12 +512,46 @@ def _extract_schedule_id(response):
     return None
 
 
+# Every spelling of "the day this sits on" seen across Garmin's calendar
+# endpoints. A key missing from this list reads as an undated row, the lookup
+# finds nothing, and the push falls through to `create` — i.e. a duplicate on
+# the athlete's calendar. Erring towards more keys is the safe direction.
+_DATE_KEYS = (
+    "calendarDate", "calendarDateLocal", "date", "localDate",
+    "scheduleDate", "scheduledDate", "scheduledAtDate",
+    "workoutDate", "workoutScheduleDate",
+)
+
+
 def _extract_date(entry):
-    for key in ("calendarDate", "date", "scheduledDate", "workoutScheduleDate"):
+    for key in _DATE_KEYS:
         value = entry.get(key)
         if isinstance(value, str) and len(value) >= 10:
             return value[:10]
     return None
+
+
+def _iter_dated_rows(obj, inherited=None):
+    """Yield `(node, date)` for every dict, carrying the enclosing date down.
+
+    Garmin returns the calendar either as flat rows that each carry their own
+    date, or as one node per day whose children are that day's sessions. The
+    inherited date covers the second shape; the node is still the unit that
+    ids and names are read from.
+
+    That anchoring is the point. Reading "the first id anywhere below the
+    date" pairs one session's id with another session's name whenever a day
+    holds two — which is a supported state here, and one that produced both a
+    silently dropped session and a workout claimed from the wrong owner.
+    """
+    if isinstance(obj, dict):
+        own = _extract_date(obj) or inherited
+        yield obj, own
+        for value in obj.values():
+            yield from _iter_dated_rows(value, own)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _iter_dated_rows(item, inherited)
 
 
 def _first_id(entry, keys):
@@ -459,14 +568,6 @@ def _extract_name(entry):
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
-
-
-def _same_name(left, right):
-    """Workout names compared the way a person would read them."""
-    if not left or not right:
-        return False
-    return " ".join(str(left).split()).lower() == \
-        " ".join(str(right).split()).lower()
 
 
 # --- the writer -------------------------------------------------------------
@@ -584,15 +685,11 @@ class GarminWorkoutWriter:
         self._schedule_cache.clear()
         return True
 
-    def delete(self, workout_id):
-        api = self._ensure_api()
-        try:
-            api.delete_workout(workout_id)
-        except Exception as exc:
-            raise GarminRejected(
-                f"Garmin refused to delete workout {workout_id}: {exc}"
-            ) from exc
-        return True
+    # There is deliberately no `delete` here. Removing a workout from the
+    # calendar is `unschedule`, which leaves the template intact; deleting the
+    # template destroys something that may not be ours and gains nothing an
+    # unschedule does not already give. The athlete can tidy their own Garmin
+    # library, and only they can tell which templates they still want.
 
     def scheduled_in_month(self, year, month, refresh=False):
         """`get_scheduled_workouts` is month-keyed, so this is the unit of
@@ -626,40 +723,37 @@ class GarminWorkoutWriter:
             return None
 
         target = _coerce_id(workout_id)
-        for entry in _iter_dicts(response):
-            entry_date = _extract_date(entry)
-            if entry_date != date:
+        for node, node_date in _iter_dated_rows(response):
+            if node_date != date:
                 continue
-            entry_workout = None
-            for key in _WORKOUT_ID_KEYS:
-                entry_workout = _coerce_id(entry.get(key))
-                if entry_workout:
-                    break
-            if entry_workout and target and entry_workout != target:
+            # Both ids come off the same row. A row is one session; taking
+            # them from wherever they happen to appear below the date mixes
+            # two sessions' identities on any day that holds more than one.
+            entry_workout = _first_id(node, _WORKOUT_ID_KEYS)
+            if not entry_workout or entry_workout != target:
                 continue
-            schedule_id = None
-            for key in _SCHEDULE_ID_KEYS:
-                schedule_id = _coerce_id(entry.get(key))
-                if schedule_id:
-                    break
-            if schedule_id and entry_workout == target:
+            schedule_id = _first_id(node, _SCHEDULE_ID_KEYS)
+            if schedule_id:
                 return schedule_id
         return None
 
-    def find_scheduled_by_name(self, name, date, refresh=False):
-        """Find a workout of this name already on the calendar for `date`.
+    def find_owned_scheduled(self, uid, date, refresh=False):
+        """Find the workout on `date` that *this app* scheduled for `uid`.
 
         Returns `(workout_id, schedule_id)`, either of which may be None.
-        This is the identity check available when the local store has lost
-        its ids entirely: without a stored workout id there is nothing to
-        hand `find_schedule_id`, and the name plus the day is all Garmin's
-        calendar offers to recognise our own session by.
+        This is the recovery path when the local store has lost its ids: the
+        session is on the calendar, nothing here remembers pushing it, and
+        uploading again would leave the athlete with two copies.
 
-        A calendar read that fails is not an error here — the caller falls
-        back to creating, which is the pre-existing behaviour.
+        Ownership is proved by the marker written into the name at creation,
+        never inferred from the name itself. Its predecessor matched titles,
+        which meant a first push could adopt a workout the athlete had built
+        by hand — and, having adopted it, later rewrite it. When ownership
+        cannot be proved this returns nothing and the caller creates its own
+        workout, which is the recoverable outcome.
+
+        A calendar read that fails is not an error here; the caller creates.
         """
-        if not name:
-            return (None, None)
         _validate_date(date)
         year, month = int(date[:4]), int(date[5:7])
         try:
@@ -667,18 +761,15 @@ class GarminWorkoutWriter:
         except GarminWriterError:
             return (None, None)
 
-        for entry in _iter_dicts(response):
-            if _extract_date(entry) != date:
+        for node, node_date in _iter_dated_rows(response):
+            if node_date != date:
                 continue
-            # The name and the ids may sit on the calendar row itself or on a
-            # nested workout object, depending on the endpoint's shape.
-            workout_id = schedule_id = found_name = None
-            for node in _iter_dicts(entry):
-                workout_id = workout_id or _first_id(node, _WORKOUT_ID_KEYS)
-                schedule_id = schedule_id or _first_id(node, _SCHEDULE_ID_KEYS)
-                found_name = found_name or _extract_name(node)
-            if _same_name(found_name, name) and workout_id:
-                return (workout_id, schedule_id)
+            if not owns_workout(_extract_name(node), uid):
+                continue
+            workout_id = _first_id(node, _WORKOUT_ID_KEYS)
+            if not workout_id:
+                continue
+            return (workout_id, _first_id(node, _SCHEDULE_ID_KEYS))
         return (None, None)
 
     # -- the idempotent push --
@@ -693,27 +784,33 @@ class GarminWorkoutWriter:
 
         - unchanged content, unchanged date  -> noop
         - unchanged content, new date        -> reschedule (reuses template)
-        - changed content                    -> update (new template, then
-                                                the old one is removed)
+        - changed content                    -> update (new template
+                                                scheduled, old one taken off
+                                                the calendar, never deleted)
         - never pushed                       -> create
 
         On `update` the new workout is uploaded and scheduled *before* the
-        old one is removed, so a mid-sequence failure leaves a visible
-        duplicate rather than an invisible missing session.
+        old one is taken off the calendar, so a mid-sequence failure leaves a
+        visible duplicate rather than an invisible missing session.
+
+        The workout goes to Garmin under a name carrying this app's ownership
+        marker for `uid`, which is what lets a later push recognise its own
+        work on the calendar without guessing from the title.
         """
         store = store or self.store
         _validate_date(date)
 
+        name = marked_workout_name(title, uid)
         structured = bool(steps)
         if structured:
-            payload = build_workout(title, steps, sport=sport,
+            payload = build_workout(name, steps, sport=sport,
                                     description=description, ftp=self.ftp)
             reason_structure = (
                 f"{_count_steps(steps)} steps sent to Garmin."
             )
         else:
             payload = build_placeholder_workout(
-                title, duration_s=duration_s, sport=sport,
+                name, duration_s=duration_s, sport=sport,
                 description=description)
             if duration_s:
                 reason_structure = (
@@ -727,8 +824,9 @@ class GarminWorkoutWriter:
                 )
 
         new_hash = workout_hash(payload)
-        record = store.get_override(uid) if store else None
-        garmin = (record or {}).get("garmin") or {}
+        # Read the push identity from the push map, not from the override —
+        # the two are separate state and the athlete's edits never touch this.
+        garmin = (store.get_push(uid) if store else None) or {}
         old_workout_id = _coerce_id(garmin.get("workout_id"))
         old_schedule_id = _coerce_id(garmin.get("schedule_id"))
         old_date = garmin.get("scheduled_for")
@@ -812,32 +910,38 @@ class GarminWorkoutWriter:
                             " (the previous copy is still on your calendar — "
                             "remove it in Garmin Connect)"
                         )
-                if old_workout_id:
-                    try:
-                        self.delete(old_workout_id)
-                    except GarminWriterError:
-                        pass  # Template left behind; harmless, not scheduled.
+                # The superseded template stays in the Garmin library. It is
+                # off the calendar and off the Edge, so it costs nothing; a
+                # delete here once destroyed a workout the athlete had built
+                # by hand, because the id being deleted had been adopted on a
+                # name match and was never ours.
 
             else:  # create
-                # Guard against a store that lost its ids: if this exact
-                # workout is somehow already on that day, adopt it. Uploading
-                # a second copy would put the session on the Edge 520 twice,
-                # and only one of the two would be ours to remove afterwards.
-                adopted_id, adopted_schedule_id = self.find_scheduled_by_name(
-                    payload.get("workoutName"), date)
+                # Guard against a store that lost its ids: if a workout *this
+                # app wrote for this uid* is already on that day, adopt it
+                # rather than upload a second copy the athlete would see
+                # twice on the Edge 520 and we could only half remove.
+                #
+                # Proof of authorship is required. An unmarked workout on the
+                # day is somebody else's and we create beside it.
+                adopted_id, adopted_schedule_id = self.find_owned_scheduled(
+                    uid, date)
                 if adopted_id:
                     result.action = "noop"
                     result.workout_id = adopted_id
                     result.schedule_id = (
                         adopted_schedule_id
                         or self.find_schedule_id(adopted_id, date))
-                    # We did not send that copy, so we do not know what is in
-                    # it. Leaving the hash unset makes the next push replace
-                    # it rather than trust content we never wrote.
+                    # It is ours by the marker, but this process did not send
+                    # it and cannot know which version it holds. Leaving the
+                    # hash unset makes the next push rewrite it rather than
+                    # trust content we cannot see.
                     pushed_hash = None
+                    # The athlete reads this; show the title they know, not
+                    # the marked-up name that went over the wire.
                     result.reason = (
-                        f"{payload.get('workoutName')} is already on your "
-                        f"Garmin calendar for {date}, so that copy was "
+                        f"{title} is already on your Garmin calendar for "
+                        f"{date} from an earlier push, so that copy was "
                         "adopted rather than a second one sent."
                     )
                 else:
@@ -870,15 +974,16 @@ class GarminWorkoutWriter:
 
         return result
 
-    def unpush_workout(self, uid, store=None, delete_template=False):
-        """Remove a workout this app scheduled.
+    def unpush_workout(self, uid, store=None):
+        """Take a workout this app scheduled off the Garmin calendar.
 
-        Only ids recorded in our own store are touched — a workout the user
-        created in Garmin Connect directly is not ours to unschedule.
+        Only ids recorded in our own push map are touched — a workout the
+        athlete created in Garmin Connect directly is not ours to unschedule.
+        The template is left in their library either way; this removes the
+        session from the calendar, it does not destroy anything.
         """
         store = store or self.store
-        record = store.get_override(uid) if store else None
-        garmin = (record or {}).get("garmin") or {}
+        garmin = (store.get_push(uid) if store else None) or {}
         workout_id = _coerce_id(garmin.get("workout_id"))
         schedule_id = _coerce_id(garmin.get("schedule_id"))
         date = garmin.get("scheduled_for")
@@ -894,8 +999,6 @@ class GarminWorkoutWriter:
                 schedule_id = self.find_schedule_id(workout_id, date)
             if schedule_id:
                 self.unschedule(schedule_id)
-            if delete_template and workout_id:
-                self.delete(workout_id)
             result.state = "done"
             result.workout_id = workout_id
             result.schedule_id = schedule_id

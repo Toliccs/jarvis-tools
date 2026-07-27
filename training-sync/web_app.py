@@ -26,6 +26,7 @@ Run it:
 
 import argparse
 import copy
+import inspect
 import json
 import os
 import re
@@ -76,6 +77,16 @@ AVAILABILITY_STATES = ("available", "unavailable", "limited")
 PROPOSAL_REASONS = ("race_recovery", "missed_workouts", "availability_changed",
                     "readiness_low", "manual")
 PUSH_SELECT_MODES = ("push_approved", "explicit", "all_effective")
+
+# Writing to the athlete's real Garmin account is opt-in, per machine, and off
+# unless this is explicitly set. Credentials in .env are what makes a push
+# *possible*; this is what makes it *intended*. Dry-run preview is unaffected —
+# it makes no network call at all — so the app is fully usable with writes off.
+ALLOW_GARMIN_WRITES_ENV = "TRAINING_SYNC_ALLOW_GARMIN_WRITES"
+WRITES_DISABLED_MESSAGE = (
+    "Writing to Garmin is switched off on this machine. Preview still works; "
+    f"to send for real, set {ALLOW_GARMIN_WRITES_ENV}=1 in training-sync/.env "
+    "and restart.")
 
 # scheduler kinds -> the kinds the calendar UI knows how to draw. One UI kind
 # per engine kind: a KEEP drawn as "SKIP" tells the athlete the opposite of the
@@ -650,6 +661,21 @@ class TrainingService:
         return bool(os.environ.get("GARMIN_EMAIL")
                     and os.environ.get("GARMIN_PASSWORD"))
 
+    @staticmethod
+    def garmin_writes_opted_in():
+        """The explicit "yes, this machine may write to my Garmin account".
+
+        Read on every call rather than captured at startup, so flipping it in
+        the environment doesn't need a code change to take effect in tests.
+        """
+        return os.environ.get(ALLOW_GARMIN_WRITES_ENV, "").strip().lower() in (
+            "1", "true", "yes", "on")
+
+    def garmin_writes_allowed(self):
+        """Demo never writes; nor does a machine that hasn't opted in."""
+        return bool(not self.demo and self.garmin_configured()
+                    and self.garmin_writes_opted_in())
+
     def garmin(self, force=False):
         """Lazily log in, at most once per GARMIN_RETRY_SECONDS. Returns None
         rather than raising — a dead Garmin subtracts context, it never stops
@@ -876,6 +902,15 @@ class TrainingService:
             "can_read_plan": can_read,
             "can_push_to_garmin": bool(sources["garmin"]["configured"]
                                        and not self.demo),
+            # Separate from the above on purpose: credentials say a push is
+            # *possible*, the opt-in says it is *intended*. The UI needs both
+            # so it can offer the preview and explain why Send is off.
+            "can_write_to_garmin": self.garmin_writes_allowed(),
+            "garmin_writes_opted_in": self.garmin_writes_opted_in(),
+            "garmin_writes_disabled_reason": (
+                None if self.garmin_writes_allowed() or self.demo
+                or not sources["garmin"]["configured"]
+                else WRITES_DISABLED_MESSAGE),
             "can_propose": scheduler_module is not None,
         }
 
@@ -1023,8 +1058,26 @@ def _override_fields(record):
     return dict((record or {}).get("fields") or {})
 
 
-def _push_state_for(record, effective_date):
-    garmin = (record or {}).get("garmin") or {}
+def push_record(store, uid, record=None):
+    """What this app has on Garmin for `uid`, whichever way the store keeps it.
+
+    `PlanStore.get_push` is the accessor to ask; the push identity is not part
+    of the athlete's edit and is being moved out of the override record into
+    its own map. Reading it off the override still works while it lives there
+    and costs nothing once it doesn't.
+    """
+    if store is not None:
+        try:
+            block = store.get_push(uid)
+        except Exception:
+            block = None
+        if block:
+            return dict(block)
+    return dict((record or {}).get("garmin") or {})
+
+
+def _push_state_for(garmin, effective_date):
+    garmin = garmin or {}
     state = garmin.get("push_state") or "never"
     if state == "scheduled" and garmin.get("scheduled_for") \
             and garmin.get("scheduled_for") != effective_date:
@@ -1033,7 +1086,7 @@ def _push_state_for(record, effective_date):
 
 
 def build_effective_workout(entry, record, availability, today,
-                            orphaned=False):
+                            orphaned=False, garmin=None):
     """Rule 1: overrides are a sparse per-field patch, not a record swap. If
     the user moved a workout and the coach later rewrote its description, the
     user keeps their date *and* gets the new text."""
@@ -1068,14 +1121,16 @@ def build_effective_workout(entry, record, availability, today,
     if not entry.get("structured"):
         conflicts.append("no_structure")
 
-    garmin = (record or {}).get("garmin") or {}
+    if garmin is None:
+        garmin = (record or {}).get("garmin") or {}
     override_block = None
-    # A cleared override leaves a tombstone behind so the push ids survive
-    # (plan_store._drop_override_locked). That residue is Garmin bookkeeping,
-    # not one of the athlete's edits, and it is reported in `garmin` already.
-    # Presenting it as an override would leave "Revert to the coach's plan"
-    # offered on a workout that is already back on the coach's plan.
-    if record and not (record.get("tombstone") and not fields):
+    # A uid the athlete has never edited still projects an override record
+    # while Garmin is holding a copy of it — plan_store flags that projection
+    # `push_only`. That residue is Garmin bookkeeping, not one of the
+    # athlete's edits, and it is reported in `garmin` already. Presenting it
+    # as an override would leave "Revert to the coach's plan" offered on a
+    # workout that is already exactly the coach's plan.
+    if record and not (record.get("push_only") and not fields):
         override_block = {
             "kind": record.get("kind"),
             "fields": sorted(fields.keys()),
@@ -1105,7 +1160,7 @@ def build_effective_workout(entry, record, availability, today,
         "garmin": {
             "workout_id": garmin.get("workout_id"),
             "schedule_id": garmin.get("schedule_id"),
-            "push_state": _push_state_for(record, effective_date),
+            "push_state": _push_state_for(garmin, effective_date),
             "pushed_at": garmin.get("pushed_at"),
             "scheduled_for": garmin.get("scheduled_for"),
             "error": redact(garmin.get("error")),
@@ -1149,6 +1204,7 @@ class EffectiveCalendar:
         self.store = store
         self.overrides = {}
         self.availability = {}
+        self._pushes = {}
         if store is not None:
             try:
                 self.overrides = store.all_overrides() or {}
@@ -1176,6 +1232,13 @@ class EffectiveCalendar:
         return {"state": "available", "note": None, "max_minutes": None,
                 "source": "default"}
 
+    def push_for(self, uid):
+        """The Garmin push record, read once per calendar and cached."""
+        if uid not in self._pushes:
+            self._pushes[uid] = push_record(self.store, uid,
+                                            self.overrides.get(uid))
+        return self._pushes[uid]
+
     def workout(self, uid):
         entry = self.by_uid.get(uid)
         record = self.overrides.get(uid)
@@ -1200,9 +1263,10 @@ class EffectiveCalendar:
                 "fingerprint": snapshot.get("fingerprint"),
             }
             return build_effective_workout(entry, record, self.availability,
-                                           self.today, orphaned=True)
+                                           self.today, orphaned=True,
+                                           garmin=self.push_for(uid))
         return build_effective_workout(entry, record, self.availability,
-                                       self.today)
+                                       self.today, garmin=self.push_for(uid))
 
     def all_workouts(self):
         uids = list(self.by_uid.keys())
@@ -1445,6 +1509,92 @@ def _proposal_changes(proposal_dict, patches=None):
     return changes
 
 
+def _proposal_premise(proposal_dict, patches, calendar):
+    """The situation this suggestion argues from, recorded as it is made.
+
+    A proposal is never a bare instruction — it is "you've marked Tuesday
+    unavailable, so this session has to move". Cancel the trip and the
+    argument is gone, but the suggestion isn't: it sits on the calendar with a
+    confident, now-false sentence under it, and approving it still moves the
+    session. So what has to remain true is written down here and re-checked on
+    every read.
+
+    Only the *primary* workout is pinned. A second session edited by hand is
+    the conflict case, which already has its own, more useful answer.
+    """
+    uid = proposal_dict.get("workout_uid")
+    days = [proposal_dict.get("original_date")]
+    days += [patch.get("from_date") for patch in patches or []]
+    blocked = sorted({
+        day for day in days
+        if day and (calendar.availability.get(day) or {}).get("state")
+        == "unavailable"
+    })
+    workout = calendar.workout(uid) if uid else None
+    return {
+        "uid": uid,
+        "workout_date": (workout or {}).get("date")
+        or proposal_dict.get("original_date"),
+        "unavailable_days": blocked,
+    }
+
+
+def proposal_stale_reason(proposal, calendar):
+    """Why this suggestion no longer applies, in his words — or None while it
+    still does.
+
+    Read from the premise recorded when the suggestion was made. A proposal
+    stored before premises existed carries none, and is left alone: inventing
+    one would withdraw a suggestion that may be perfectly live.
+    """
+    premise = proposal.get("premise")
+    if not isinstance(premise, dict):
+        return None
+    for day in premise.get("unavailable_days") or []:
+        state = (calendar.availability.get(day) or {}).get("state")
+        if state != "unavailable":
+            return (f"You're free on {_day_label(day)} again, so the reason "
+                    f"for this has gone.")
+    uid = premise.get("uid") or proposal.get("uid")
+    if not uid:
+        return None
+    workout = calendar.workout(uid)
+    if workout is None:
+        return "That session has left your plan, so this no longer applies."
+    if workout.get("status") in ("skipped", "done"):
+        return ("You've already dealt with that session, so this no longer "
+                "applies.")
+    was = premise.get("workout_date")
+    if was and workout.get("date") != was:
+        return (f"You've since moved that session to "
+                f"{_day_label(workout.get('date'))}, so this no longer "
+                f"applies.")
+    return None
+
+
+def mark_stale(proposals, calendar):
+    """Tag every proposal with whether its premise still holds.
+
+    Stale ones are kept and labelled rather than deleted — a suggestion that
+    quietly vanishes is as confusing as one that lies. What they may not do is
+    apply: the approve handler refuses them, force or not.
+
+    Only undecided ones are tested. A proposal he already approved moved the
+    session, which is precisely the change that would read as a broken
+    premise; it is history, not an offer, and must not be labelled stale.
+    """
+    out = []
+    for proposal in proposals or []:
+        reason = None
+        if proposal.get("status") == "pending":
+            try:
+                reason = proposal_stale_reason(proposal, calendar)
+            except Exception:
+                reason = None
+        out.append(dict(proposal, stale=bool(reason), stale_reason=reason))
+    return out
+
+
 def engine_proposal_to_api(proposal_dict, reason, calendar):
     uid = proposal_dict.get("workout_uid")
     record = calendar.overrides.get(uid) or {}
@@ -1476,6 +1626,10 @@ def engine_proposal_to_api(proposal_dict, reason, calendar):
             [p["uid"] for p in patches] + ([uid] if uid else []))),
         "rationale": proposal_dict.get("reason"),
         "rationale_details": proposal_dict.get("reason_details") or [],
+        # What has to still be true for that rationale to still be true.
+        "premise": _proposal_premise(proposal_dict, patches, calendar),
+        "stale": False,
+        "stale_reason": None,
         "tradeoff": proposal_dict.get("tradeoff"),
         "question": proposal_dict.get("question"),
         "blocked_pending_input": bool(proposal_dict.get("blocked_pending_input")),
@@ -1684,9 +1838,12 @@ def save_unresolved(service, covered, items):
 def live_unresolved(service, calendar, start=None, end=None):
     """The unresolved items still worth showing.
 
-    One is stale the moment its situation changes — the workout was moved by
-    hand, skipped, or has left the plan — so it's filtered out on read rather
-    than lingering as a permanent scar on the calendar.
+    One is stale the moment its situation changes, and "the situation" is not
+    only the workout. "I can't place this anywhere" was an answer about a week
+    the athlete had blocked out; unblock the days and the sentence is no
+    longer true, so the amber flag has to go with them. Checking only the
+    workout left six of them burning on the calendar forever after the trip
+    was cancelled.
     """
     out = []
     for item in read_unresolved(service):
@@ -1704,6 +1861,14 @@ def live_unresolved(service, calendar, start=None, end=None):
             continue
         if workout.get("date") != item.get("from_date"):
             continue
+        # The same premise-still-holds test the proposals get. Items written
+        # before premises existed carry none and fall through to the checks
+        # above, exactly as they did before.
+        try:
+            if proposal_stale_reason(item, calendar):
+                continue
+        except Exception:
+            pass
         item = dict(item, status="unresolved", requires_approval=True,
                     title=item.get("title") or workout.get("title"))
         out.append(item)
@@ -1809,30 +1974,132 @@ def _conflicting_fields(record, changes):
                   if key in existing and existing[key] != value)
 
 
+def _last_entry_id(store, uid):
+    """The id of the audit entry the write just made — the handle a rollback
+    needs in order to take back exactly that write and nothing else."""
+    try:
+        entries = store.history(limit=1, uid=uid) or []
+    except Exception:
+        return None
+    return entries[0].get("entry_id") if entries else None
+
+
+def _restore_push_state(store, uid, before):
+    """Put the Garmin push state back to what it was before a rolled-back write.
+
+    Undo restores the athlete's edit. Whether the *push* state travels with it
+    depends on where the store keeps the push record, so it is checked and
+    repaired here rather than assumed. What must not survive a rollback is
+    "drifted": that state is terminal, because a re-push matches the stored
+    hash, takes the noop branch and returns before it can record anything new
+    — so the "changed since it was pushed" warning would never clear again.
+
+    One residue: `record_push` re-stamps `pushed_at` when it writes a
+    "scheduled" state, and offers no way to say "this landed earlier", so a
+    repaired record reads as pushed at the moment of the rollback rather than
+    the moment of the push. `pushed_at` is passed through here already, and
+    the moment the store accepts it the residue goes with it.
+    """
+    if not before or not before.get("push_state"):
+        return
+    try:
+        after = store.get_push(uid) or {}
+    except Exception:
+        return
+    if after.get("push_state") == before.get("push_state"):
+        return
+    # push_state is the whole point of the repair, so it is always passed
+    # explicitly — never left to a default that would invent a state the
+    # workout was never in. The rest is passed only where the store's
+    # `record_push` takes it; its shape is being reworked underneath this file.
+    kwargs = {"push_state": before.get("push_state"), "actor": "system"}
+    optional = ("workout_id", "schedule_id", "scheduled_for", "pushed_hash",
+                "error", "pushed_at")
+    try:
+        accepted = set(inspect.signature(store.record_push).parameters)
+    except (TypeError, ValueError):
+        accepted = set(optional)
+    kwargs.update({key: before.get(key) for key in optional
+                   if key in accepted})
+    try:
+        store.record_push(uid, **kwargs)
+    except Exception:
+        pass
+
+
 def _rollback_patches(store, applied):
-    """Undo the operations already written, newest first.
+    """Take the operations already written back, newest first.
 
     A half-applied swap is worse than no swap: one session moved, the other
     left behind, and a double-booked day. If any operation can't be written,
     every one before it is put back.
+
+    Each is reversed through the store's own undo, which restores the whole
+    prior record. Re-patching the fields back looked like a fresh user edit,
+    and a user edit flips an already-pushed workout from "scheduled" to
+    "drifted" — permanently, for the reason in `_restore_push_state`. A
+    rollback is a compensating action, not an edit: it has to leave the
+    workout exactly as it found it, push state included.
     """
-    for uid, before, changes in reversed(applied):
+    for uid, entry_id, push_before in reversed(applied):
         try:
-            if before is None:
-                store.clear_override(uid, actor="system")
-                continue
-            fields = before.get("fields") or {}
-            # A key absent from the old record maps to None, which clears it.
-            restore = {key: fields.get(key) for key in changes}
-            store.patch_workout(uid, fields=restore,
-                                note=before.get("note") or "",
-                                kind=before.get("kind") or "alfred",
-                                actor="system", force=True,
-                                action="rollback_proposal")
+            if entry_id:
+                store.undo(entry_id, actor="system")
+            _restore_push_state(store, uid, push_before)
         except Exception:
             # Best effort — a rollback failure must not mask the original
             # error, which is what the athlete actually needs to read.
             pass
+
+
+def _primary_write(proposal):
+    """The field patch approving this proposal would write to its own workout,
+    derived exactly as ``PlanStore.approve_proposal`` derives it — including
+    its fallback to `to_date` for a proposal that carries no explicit changes.
+
+    Asking "would approving this write anything?" any other way risks
+    answering no while the store goes on to write something.
+    """
+    changes = dict(proposal.get("changes") or {})
+    if not changes and proposal.get("to_date"):
+        changes["date"] = proposal["to_date"]
+    if changes.get("date"):
+        changes.setdefault("status", "moved")
+    return changes
+
+
+def _decide_without_writing(store, proposal_id):
+    """Mark a proposal approved without touching the workout record at all.
+
+    The store materialises every approval as a patch, and a patch is never
+    free even when its field set is empty: it bumps the rev and appends an
+    undoable history entry. On a workout the athlete already owns — he ticked
+    "approve for push", say — that entry becomes the newest change to the uid
+    and retires his own, so his Undo silently stops offering the edit he
+    actually made and starts refusing it with "there's a newer change".
+
+    A KEEP writes nothing, so nothing is written: the decision is recorded on
+    the proposal alone. The store exposes no write-free approve, hence the
+    narrow reach past its accessors here; if it ever grows one, or its state
+    is shaped differently, this falls back to the normal path rather than
+    losing the athlete's decision.
+    """
+    lock = getattr(store, "_lock", None)
+    state = getattr(store, "_state", None)
+    proposals = state.get("proposals") if isinstance(state, dict) else None
+    if lock is None or not isinstance(proposals, list):
+        return (store.approve_proposal(proposal_id, actor="user")
+                or {}).get("proposal")
+    with lock:
+        for record in proposals:
+            if record.get("proposal_id") != proposal_id:
+                continue
+            record["status"] = "approved"
+            record["decided_at"] = _utc_now()
+            store.save()
+            return copy.deepcopy(record)
+    raise ApiError("unknown_uid", "That suggestion no longer exists.",
+                   status=404)
 
 
 def proposal_patches(proposal):
@@ -1855,13 +2122,37 @@ def proposal_patches(proposal):
 
 
 def _select_uids(calendar, start, end, select, uids):
+    """Returns ``(to_push, refused)``.
+
+    Approving a plan change and sending it to the device are two separate
+    consents, so a workout without `push_approved` is never sent — not by an
+    explicit uid list and not by "push everything". "Everything" means every
+    session the athlete has approved; the rest come back in `refused` and are
+    reported row by row with the reason, rather than being silently included
+    or silently dropped.
+    """
     in_range = calendar.in_range(start, end)
     if select == "explicit":
         wanted = set(uids or [])
-        return [w for w in in_range if w["uid"] in wanted]
-    if select == "all_effective":
-        return in_range
-    return [w for w in in_range if w["push_approved"]]
+        candidates = [w for w in in_range if w["uid"] in wanted]
+    else:
+        candidates = list(in_range)
+    approved = [w for w in candidates if w["push_approved"]]
+    if select == "push_approved":
+        # The caller asked for the approved set by name; everything else in
+        # the week was never a candidate and reporting it would be noise.
+        return approved, []
+    return approved, [w for w in candidates if not w["push_approved"]]
+
+
+def _not_approved_item(workout):
+    """A push row for a session the caller asked for but hasn't approved."""
+    return {"uid": workout["uid"], "date": workout["date"],
+            "title": workout["title"], "action": "skip",
+            "reason": "Not approved for push — tick “Approve for push” on the "
+                      "session first.",
+            "state": "skipped", "garmin_workout_id": None,
+            "garmin_schedule_id": None, "error": None, "structured": False}
 
 
 def build_push_items(service, calendar, workouts, dry_run):
@@ -1947,6 +2238,17 @@ def run_push_job(service, job_id):
     job["started_at"] = _utc_now()
     service.record_job(job)
 
+    # The last gate before the only code in this app that writes to the
+    # athlete's Garmin account. The endpoint checks it too; this one is on the
+    # write path itself, so no future caller can route around it.
+    if not service.garmin_writes_allowed():
+        job["state"] = "failed"
+        job["finished_at"] = _utc_now()
+        job["error"] = {"code": "writes_disabled",
+                        "message": WRITES_DISABLED_MESSAGE}
+        service.record_job(job)
+        return
+
     calendar = EffectiveCalendar(service)
     store = calendar.store
     try:
@@ -1972,6 +2274,13 @@ def run_push_job(service, job_id):
             item["state"] = "failed"
             item["error"] = {"code": "unknown_uid",
                              "message": "That workout is no longer on the plan."}
+            done += 1
+            continue
+        if not workout["push_approved"]:
+            # Approval can be withdrawn between the job being built and being
+            # run. The rule lives here, next to the write, and not only where
+            # the list was chosen.
+            job["items"][index] = _not_approved_item(workout)
             done += 1
             continue
         try:
@@ -2203,8 +2512,12 @@ def create_app(demo=None):
         unresolved_all = []
         if include_proposals and calendar.store is not None:
             try:
-                for proposal in calendar.store.list_proposals(
-                        status="pending", start=start, end=end) or []:
+                pending = calendar.store.list_proposals(
+                    status="pending", start=start, end=end) or []
+                # Every suggestion carries whether its premise still holds, so
+                # the calendar can never print a confident reason that has
+                # since become false.
+                for proposal in mark_stale(pending, calendar):
                     day = proposal.get("to_date") or proposal.get("from_date")
                     if day:
                         proposals_by_day.setdefault(day, []).append(proposal)
@@ -2273,8 +2586,8 @@ def create_app(demo=None):
         proposals = []
         if calendar.store is not None:
             try:
-                proposals = [p for p in calendar.store.list_proposals(
-                    status="pending", start=day, end=day) or []]
+                proposals = mark_stale(calendar.store.list_proposals(
+                    status="pending", start=day, end=day) or [], calendar)
             except Exception:
                 proposals = []
         try:
@@ -2475,7 +2788,7 @@ def create_app(demo=None):
             "range": {"start": start, "end": end},
             "replanned": {"start": covered[0], "end": covered[1]}
             if covered else None,
-            "proposals": stored,
+            "proposals": mark_stale(stored, calendar),
             "unresolved": unresolved,
             "warnings": warnings,
         }
@@ -2495,14 +2808,14 @@ def create_app(demo=None):
         store = service.store_or_none()
         if store is None:
             return {"proposals": [], "unresolved": []}
+        calendar = EffectiveCalendar(service)
         try:
-            proposals = store.list_proposals(
-                status=status or None, start=start, end=end) or []
+            proposals = mark_stale(store.list_proposals(
+                status=status or None, start=start, end=end) or [], calendar)
         except Exception:
             proposals = []
         try:
-            unresolved = live_unresolved(service, EffectiveCalendar(service),
-                                         start, end)
+            unresolved = live_unresolved(service, calendar, start, end)
         except Exception:
             unresolved = []
         return {"proposals": proposals, "unresolved": unresolved}
@@ -2533,16 +2846,40 @@ def create_app(demo=None):
                 "You've already dismissed this suggestion.", status=409,
                 detail={"uid": uid})
 
+        # A suggestion whose premise has gone must never apply, force or not:
+        # it would move a session for a reason the athlete can read on the
+        # card and knows to be false.
+        stale = proposal_stale_reason(proposal, calendar)
+        if stale:
+            raise ApiError(
+                "proposal_stale",
+                stale + " Ask Alfred again for a suggestion that fits how the "
+                        "week looks now.",
+                status=409, detail={"uid": uid, "stale": True})
+
         patches = proposal_patches(proposal)
-        primary_changes = dict(proposal.get("changes") or {})
+        # What the store itself would write for the primary workout, derived
+        # by the store's own rule (it falls back to `to_date` when a proposal
+        # carries no explicit changes) — so "does approving this write
+        # anything?" is answered by the same rule that would do the writing.
+        primary_changes = _primary_write(proposal)
         # The primary workout is written by the store when it marks the
         # proposal approved; everything else is written here, in the engine's
         # order, and the whole set stands or falls together.
         secondary = [p for p in patches if p["uid"] != uid]
+
         # A KEEP has nothing to write at all — "I left the race where it is"
-        # is an answer, not an edit. Approving it must not leave an empty
-        # override behind.
-        no_op = not primary_changes and not patches
+        # is an answer, not an edit — and so it never enters the write path.
+        # An empty patch is not free: it bumps the rev and appends an undoable
+        # entry, which retires the athlete's *own* last change. Approving a
+        # suggestion that alters nothing used to eat his undo.
+        if not primary_changes and not patches:
+            decided = _decide_without_writing(store, proposal_id)
+            after = EffectiveCalendar(service)
+            return {"proposal": decided, "workout": after.workout(uid),
+                    "workouts": [w for w in [after.workout(uid)] if w],
+                    "applied": []}
+
         before_primary = store.get_override(uid) if uid else None
 
         if not force:
@@ -2575,13 +2912,15 @@ def create_app(demo=None):
         applied = []
         try:
             for patch in secondary:
-                before = store.get_override(patch["uid"])
+                push_before = calendar.push_for(patch["uid"])
                 store.patch_workout(
                     patch["uid"], fields=dict(patch["changes"]),
                     note=patch.get("note"), kind="alfred",
                     plan_snapshot=calendar.snapshot_for(patch["uid"]),
                     actor="user", force=force, action="approve_proposal")
-                applied.append((patch["uid"], before, dict(patch["changes"])))
+                applied.append((patch["uid"],
+                                _last_entry_id(store, patch["uid"]),
+                                push_before))
             # Approving materialises the proposal into an override. It does
             # not push — approving a plan change and sending it to the device
             # are two separate consents.
@@ -2598,21 +2937,6 @@ def create_app(demo=None):
                     "force to accept it.")
                 error.detail = {"force": True, "uid": uid}
             raise error
-
-        if no_op and before_primary is None:
-            # The store materialises every approval as an override; for a KEEP
-            # that leaves an empty record with a bumped rev, which reads on the
-            # calendar as "Alfred changed this" when nothing changed.
-            record = store.get_override(uid)
-            if record is not None and not (record.get("fields") or {}) \
-                    and record.get("kind") == "alfred" \
-                    and (record.get("garmin") or {}).get("push_state") in (
-                        None, "never"):
-                try:
-                    store.clear_override(uid, actor="system")
-                    result["override"] = None
-                except Exception:
-                    pass
 
         after = EffectiveCalendar(service)
         touched = [p["uid"] for p in patches]
@@ -2667,6 +2991,13 @@ def create_app(demo=None):
             if not service.garmin_configured():
                 raise ApiError("not_configured",
                                NOT_CONFIGURED_MESSAGES["garmin"], status=503)
+            if not service.garmin_writes_opted_in():
+                # Credentials make a write possible; this makes it intended.
+                # An accidental run — a stray curl, a script, a browser tab
+                # left open — must not reach the athlete's Garmin account.
+                raise ApiError("writes_disabled", WRITES_DISABLED_MESSAGE,
+                               status=403,
+                               detail={"env_var": ALLOW_GARMIN_WRITES_ENV})
             running = service.active_job_id()
             if running:
                 raise ApiError("push_in_flight",
@@ -2674,8 +3005,12 @@ def create_app(demo=None):
                                detail={"job_id": running})
 
         calendar = EffectiveCalendar(service)
-        workouts = _select_uids(calendar, start, end, select, body.get("uids"))
+        workouts, refused = _select_uids(calendar, start, end, select,
+                                         body.get("uids"))
         items = build_push_items(service, calendar, workouts, dry_run)
+        # Listed, not dropped: "I asked for the whole week and 4 went" is only
+        # honest if the other 3 say why they didn't.
+        items += [_not_approved_item(w) for w in refused]
 
         job = {
             "job_id": _new_id("psh"),
@@ -2692,6 +3027,8 @@ def create_app(demo=None):
             "summary": _summarise(items) if dry_run else {
                 "created": 0, "rescheduled": 0, "updated": 0,
                 "skipped": 0, "failed": 0, "noop": 0},
+            "not_approved": {"count": len(refused),
+                             "uids": [w["uid"] for w in refused]},
             "note": ("Sync your Edge 520 with Garmin Connect to get these on "
                      "the device."),
         }

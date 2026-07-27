@@ -1157,3 +1157,497 @@ def test_a_failed_reschedule_leaves_a_recoverable_state(tmp_path):
     retry = push_threshold(writer, store, SUN)
     assert retry.state == "done"
     assert api.days() == [SUN]
+
+
+# ---------------------------------------------------------------------------
+# ROUND 3 — STRUCTURAL CHANGES TO THE WRITE PATH
+#
+# Round 2 patched the write path and its own fix introduced the two worst
+# defects found so far. These tests pin the *structure* that makes those
+# classes of bug unrepresentable rather than merely unreached:
+#
+#   1. the Garmin push identity lives in its own state map, so no user-edit
+#      operation can reach it;
+#   2. the writer never destroys a workout, and only adopts one it can prove
+#      it wrote;
+#   3. undo is a real stack that can never alter push identity.
+# ---------------------------------------------------------------------------
+
+
+class NestedCalendarApi(FakeGarminApi):
+    """The same fake calendar in Garmin's other envelope.
+
+    `get_scheduled_workouts` is not shape-stable: some responses carry one
+    node per *day* holding that day's rows as siblings, with the date on the
+    day node and the ids on the rows. Two sessions on one day are then two
+    sibling dicts under a single dated parent — the shape in which reading
+    "the first id anywhere below the date" silently pairs one workout's id
+    with another's name.
+    """
+
+    def get_scheduled_workouts(self, year, month):
+        prefix = f"{int(year):04d}-{int(month):02d}"
+        by_date = {}
+        for row in self.calendar:
+            if not row["date"].startswith(prefix):
+                continue
+            row = dict(row)
+            day = row.pop("date")
+            if not self.expose_schedule_ids:
+                row.pop("workoutScheduleId", None)
+            by_date.setdefault(day, []).append(row)
+        # `scheduleDate` is a real key of this envelope and one the writer
+        # used not to recognise — a missed date falls through to `create`.
+        return {"calendarItems": [{"scheduleDate": day, "items": rows}
+                                  for day, rows in sorted(by_date.items())]}
+
+
+def hand_built_on(api, date, name="Threshold 3x12min"):
+    """A workout the athlete built and scheduled in Garmin Connect itself.
+
+    Nothing about it came from this app, so nothing here may rewrite,
+    unschedule or delete it.
+    """
+    workout_id = api.upload_workout({"workoutName": name})["workoutId"]
+    api.schedule_workout(workout_id, date)
+    return workout_id
+
+
+# --- CHANGE 1: push identity lives outside the user's override record ------
+
+
+def test_undoing_an_edit_made_before_a_push_keeps_the_push_identity(tmp_path):
+    """DEFECT 1 — undo restored a whole pre-push snapshot, ids included.
+
+    Two edits, then a push, then Undo on the newest edit. The entry's
+    `before` snapshot was taken before the push, so restoring it wholesale
+    put the *pre-push* Garmin block back and the workout id vanished. The
+    ids are not part of the user's edit and no undo may touch them.
+    """
+    store = fresh_store(tmp_path)
+    store.move_workout("u1", THU)
+    store.move_workout("u1", FRI)
+    store.record_push("u1", workout_id=42424, schedule_id=777,
+                      scheduled_for=FRI, pushed_hash="h1")
+
+    newest = next(e for e in store.history(uid="u1") if e["undoable"])
+    store.undo(newest["entry_id"])
+
+    push = store.get_push("u1")
+    assert push["workout_id"] == 42424
+    assert push["schedule_id"] == 777
+    assert push["scheduled_for"] == FRI
+    assert push["pushed_hash"] == "h1"
+    assert "u1" in store.pushed_uids()
+
+
+def test_undo_after_a_push_does_not_stack_a_second_copy_on_the_edge(tmp_path):
+    """The same defect end to end, as the athlete meets it.
+
+    Edit, edit, push, undo the second edit, push again. A resurrected empty
+    identity makes the second push take `create`, and the athlete ends up
+    with the session on two days — only one of which this app can remove.
+    """
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    store.move_workout("u1", THU)
+    store.move_workout("u1", FRI)
+    first = push_threshold(writer, store, FRI)
+    assert first.action == "create"
+
+    newest = next(e for e in store.history(uid="u1") if e["undoable"])
+    store.undo(newest["entry_id"])
+
+    second = push_threshold(writer, store, THU)
+    assert second.action == "reschedule"
+    assert second.workout_id == first.workout_id
+    assert api.days() == [THU], "one session, one day"
+
+
+def test_no_user_edit_operation_can_reach_the_push_identity(tmp_path):
+    """The structural claim itself: the override record has no Garmin block.
+
+    Every user-facing write goes through `workout_overrides`; the ids live in
+    `garmin_push`. There is no field for an edit to clobber, so this holds by
+    construction rather than by guard.
+    """
+    store = fresh_store(tmp_path)
+    store.record_push("u1", workout_id=111, schedule_id=222,
+                      scheduled_for=SAT, pushed_hash="h1")
+    identity = (111, 222, SAT, "h1")
+
+    def still_intact():
+        push = store.get_push("u1")
+        return (push["workout_id"], push["schedule_id"],
+                push["scheduled_for"], push["pushed_hash"])
+
+    store.patch_workout("u1", fields={"title": "My own name"})
+    assert still_intact() == identity
+    store.move_workout("u1", SUN)
+    assert still_intact() == identity
+    store.set_status("u1", "skipped")
+    assert still_intact() == identity
+    store.clear_override("u1")
+    assert still_intact() == identity
+
+    raw = store.snapshot()["workout_overrides"]
+    assert all("garmin" not in record for record in raw.values()), \
+        "an override record must have nowhere to keep a Garmin id"
+
+
+def test_an_edit_after_a_push_still_reports_drift(tmp_path):
+    """Separating the two must not lose the "this differs from your Edge"
+    signal — it just moves to the push record, which is where it belongs."""
+    store = fresh_store(tmp_path)
+    store.record_push("u1", workout_id=111, schedule_id=222,
+                      scheduled_for=SAT, pushed_hash="h1")
+    store.move_workout("u1", SUN)
+
+    push = store.get_push("u1")
+    assert push["push_state"] == "drifted"
+    assert push["workout_id"] == 111, "drift is a state, not an identity edit"
+
+
+def test_a_cleared_override_is_never_left_unremovable(tmp_path):
+    """DEFECT 8 — the tombstone had no exit.
+
+    `clear_override` early-returned on a tombstone and `clear_push` blanked
+    the ids without clearing the flag, leaving a record with no fields, no
+    ids and no way out: it rendered forever as "Removed from TrainingPeaks"
+    and DELETE on it was a no-op. With the two maps split there is no such
+    state to reach.
+    """
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    store.move_workout("u1", SAT)
+    push_threshold(writer, store, SAT)
+
+    store.clear_override("u1")          # "revert to the coach's plan"
+    assert store.get_push("u1")["workout_id"] is not None, \
+        "Garmin still holds it, so the app must still know"
+
+    removed = writer.unpush_workout("u1", store=store)
+    assert removed.state == "done"
+    assert api.days() == []
+    assert store.get_push("u1") is None
+    assert store.get_override("u1") is None, "no residue left behind"
+    assert store.clear_override("u1") is None, "and still idempotent"
+    assert store.snapshot()["workout_overrides"] == {}
+    assert store.snapshot()["garmin_push"] == {}
+
+
+def test_two_uids_can_never_hold_one_garmin_schedule_id(tmp_path):
+    """Change 2(c). Two distinct sessions converging on one schedule id means
+    an unschedule for one silently removes the other from the calendar."""
+    store = fresh_store(tmp_path)
+    store.record_push("u1", workout_id=111, schedule_id=222,
+                      scheduled_for=SAT, pushed_hash="h1")
+
+    with pytest.raises(store_module.PlanStoreError):
+        store.record_push("u2", workout_id=333, schedule_id=222,
+                          scheduled_for=SAT, pushed_hash="h2")
+    with pytest.raises(store_module.PlanStoreError):
+        store.record_push("u3", workout_id=111, schedule_id=444,
+                          scheduled_for=SAT, pushed_hash="h3")
+
+    assert store.get_push("u2") is None, "a refused push writes nothing"
+    assert store.get_push("u3") is None
+    assert store.get_push("u1")["schedule_id"] == 222
+
+
+def test_a_v1_state_file_migrates_its_push_identity_forward(tmp_path):
+    """A real state file on disk must survive the split with nothing lost."""
+    import json as _json
+
+    path = tmp_path / "v1.json"
+    v1 = {
+        "schema_version": 1,
+        "updated_at": "2026-07-20T10:00:00Z",
+        "day_availability": {
+            WED: {"state": "unavailable", "note": "Work",
+                  "max_minutes": None, "updated_at": "2026-07-20T09:00:00Z"},
+        },
+        "workout_overrides": {
+            "u-edit": {
+                "uid": "u-edit", "kind": "user", "rev": 3,
+                "created_at": "2026-07-19T08:00:00Z",
+                "updated_at": "2026-07-20T09:30:00Z",
+                "note": "moved to Saturday",
+                "fields": {"date": SAT, "status": "moved"},
+                "plan_snapshot": {"title": "Threshold 3x12min", "date": FRI},
+                "garmin": {"workout_id": 111, "schedule_id": 222,
+                           "scheduled_for": SAT,
+                           "pushed_at": "2026-07-20T09:31:00Z",
+                           "pushed_hash": "h1", "push_state": "scheduled",
+                           "error": None},
+                "orphaned_since": None,
+            },
+            "u-tomb": {
+                "uid": "u-tomb", "kind": "system", "rev": 9,
+                "created_at": "2026-07-18T08:00:00Z",
+                "updated_at": "2026-07-20T09:40:00Z",
+                "note": None, "fields": {},
+                "plan_snapshot": {"title": "Endurance 2hr Z2", "date": SUN},
+                "garmin": {"workout_id": 333, "schedule_id": 444,
+                           "scheduled_for": SUN,
+                           "pushed_at": "2026-07-20T09:41:00Z",
+                           "pushed_hash": "h2", "push_state": "scheduled",
+                           "error": None},
+                "orphaned_since": None,
+                "tombstone": True,
+            },
+            "u-plain": {
+                "uid": "u-plain", "kind": "user", "rev": 1,
+                "created_at": "2026-07-19T08:00:00Z",
+                "updated_at": "2026-07-19T08:00:00Z",
+                "note": None, "fields": {"status": "skipped"},
+                "plan_snapshot": None,
+                "garmin": {"workout_id": None, "schedule_id": None,
+                           "scheduled_for": None, "pushed_at": None,
+                           "pushed_hash": None, "push_state": "never",
+                           "error": None},
+                "orphaned_since": None,
+            },
+        },
+        "proposals": [{"proposal_id": "prp_1", "uid": "u-edit",
+                       "status": "pending", "from_date": FRI, "to_date": SAT,
+                       "created_at": "2026-07-19T08:00:00Z",
+                       "decided_at": None, "decision_note": None}],
+        "rejected_signatures": [{"uid": "u-x", "signature": "move:->",
+                                 "rejected_at": "2026-07-19T08:00:00Z"}],
+        "history": [{"entry_id": "evt_1", "at": "2026-07-19T08:00:00Z",
+                     "action": "move", "uid": "u-edit", "actor": "user",
+                     "before": None, "after": {"uid": "u-edit"},
+                     "undoable": True}],
+    }
+    path.write_text(_json.dumps(v1), encoding="utf-8")
+
+    store = PlanStore(path=str(path))
+    assert store.load_error is None, "a v1 file is not corrupt"
+
+    # The user's edits survive untouched.
+    edit = store.get_override("u-edit")
+    assert edit["fields"] == {"date": SAT, "status": "moved"}
+    assert edit["note"] == "moved to Saturday"
+    assert edit["rev"] == 3
+
+    # The push identity survives, in its own map now.
+    assert store.get_push("u-edit")["workout_id"] == 111
+    assert store.get_push("u-edit")["schedule_id"] == 222
+    assert store.get_push("u-edit")["pushed_hash"] == "h1"
+
+    # A v1 tombstone was nothing but push identity: it becomes exactly that.
+    assert store.get_push("u-tomb")["workout_id"] == 333
+    assert set(store.pushed_uids()) == {"u-edit", "u-tomb"}
+
+    # A never-pushed override gains no push record at all.
+    assert store.get_push("u-plain") is None
+    assert store.get_override("u-plain")["fields"] == {"status": "skipped"}
+
+    # Nothing else in the file is disturbed.
+    snapshot = store.snapshot()
+    assert snapshot["day_availability"] == v1["day_availability"]
+    assert snapshot["proposals"] == v1["proposals"]
+    assert snapshot["rejected_signatures"] == v1["rejected_signatures"]
+    assert len(snapshot["history"]) == 1
+    assert snapshot["schema_version"] == 2
+    for record in snapshot["workout_overrides"].values():
+        assert "garmin" not in record and "tombstone" not in record
+
+    # And it round-trips: reloading the migrated file changes nothing.
+    store.save()
+    again = PlanStore(path=str(path))
+    assert again.get_push("u-edit") == store.get_push("u-edit")
+    assert again.get_override("u-edit")["fields"] == edit["fields"]
+    assert again.snapshot()["workout_overrides"].keys() == \
+        snapshot["workout_overrides"].keys()
+
+
+def test_the_real_state_file_on_disk_survives_the_migration(tmp_path):
+    """The shipped `.plan_state.json` is a real user's data, not a fixture."""
+    import json as _json
+    import os as _os
+    import shutil as _shutil
+
+    source = _os.path.join(
+        _os.path.dirname(_os.path.abspath(store_module.__file__)),
+        ".plan_state.json")
+    if not _os.path.exists(source):
+        pytest.skip("no live state file in this checkout")
+
+    target = tmp_path / "real.json"
+    _shutil.copyfile(source, target)
+    original = _json.loads(target.read_text(encoding="utf-8"))
+
+    store = PlanStore(path=str(target))
+    assert store.load_error is None
+    store.save()
+
+    after = _json.loads(target.read_text(encoding="utf-8"))
+    assert after["day_availability"] == original["day_availability"]
+    assert after["proposals"] == original["proposals"]
+    assert len(after["history"]) == len(original["history"])
+    assert set(after["workout_overrides"]) <= set(original["workout_overrides"])
+    assert after["schema_version"] == 2
+
+
+# --- CHANGE 2: the writer destroys nothing it did not create ---------------
+
+
+def test_a_push_never_adopts_a_workout_the_athlete_built(tmp_path):
+    """DEFECT 3, the destructive one.
+
+    The round-2 adoption guard matched on name alone, so a first push claimed
+    the athlete's own hand-built Garmin workout. Because the adopted copy had
+    no known content hash the *next* push took `update`, and the update path
+    deleted the old workout — destroying a template the app never created.
+    """
+    store = fresh_store(tmp_path)
+    api = FakeGarminApi(first_workout_id=100)
+    hand_id = hand_built_on(api, SAT)
+    writer, _ = writer_for(store, api)
+
+    first = push_threshold(writer, store, SAT)
+    assert first.state == "done"
+    assert first.action == "create", "an unproven workout may not be adopted"
+    assert first.workout_id != hand_id
+    assert store.get_push("u1")["workout_id"] != hand_id
+
+    # Now rewrite our session. The athlete's must be untouched by it.
+    second = writer.push_workout("u1", "Threshold 3x12min", SAT,
+                                 duration_s=5400, store=store)
+    assert second.action == "update" and second.state == "done"
+    assert hand_id in api.templates, "the athlete's own workout was destroyed"
+    assert not [c for c in api.calls if c[0] == "delete"]
+    assert not [c for c in api.calls
+                if c[0] == "unschedule" and c[1] == 5000], \
+        "the athlete's calendar entry is not ours to unschedule"
+
+
+def test_the_update_path_never_deletes_anything(tmp_path):
+    """Change 2(a): rewriting a session removes the old copy from the
+    calendar and stops there. `delete` is gone from the writer entirely —
+    there is no call site left to reach it from."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT)
+
+    second = writer.push_workout("u1", "Threshold 3x12min", SAT,
+                                 duration_s=5400, store=store)
+    assert second.action == "update" and second.state == "done"
+    assert not [c for c in api.calls if c[0] == "delete"]
+    assert api.days() == [SAT], "exactly one copy of ours on the day"
+    assert not hasattr(writer_module.GarminWorkoutWriter, "delete"), \
+        "the capability itself is removed, not merely unused"
+
+
+def test_two_sessions_sharing_a_title_on_one_day_both_reach_garmin(tmp_path):
+    """DEFECT 2 — the plan repeats titles weekly and two-on-a-day is a
+    supported state. Name matching collapsed them: the second reported
+    'done' but never reached the Edge, and both uids claimed one schedule."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+
+    morning = writer.push_workout("u-am", "Threshold 3x12min", SAT,
+                                  duration_s=3600, store=store)
+    evening = writer.push_workout("u-pm", "Threshold 3x12min", SAT,
+                                  duration_s=3600, store=store)
+
+    assert morning.state == "done" and evening.state == "done"
+    assert morning.action == "create" and evening.action == "create"
+    assert morning.workout_id != evening.workout_id
+    assert morning.schedule_id != evening.schedule_id
+    assert api.days() == [SAT, SAT], "both sessions must reach the Edge"
+    assert store.get_push("u-am")["schedule_id"] != \
+        store.get_push("u-pm")["schedule_id"]
+
+
+def test_adoption_reads_one_row_and_proves_it_wrote_it(tmp_path):
+    """DEFECT 9 plus the ownership rule, in the nested calendar shape.
+
+    The day node holds the athlete's session and ours as siblings. Taking
+    "the first id below the date" pairs the athlete's id with our name. Ids,
+    name and ownership marker must all be read off a single row.
+    """
+    store = fresh_store(tmp_path)
+    api = NestedCalendarApi(first_workout_id=100)
+    hand_id = hand_built_on(api, SAT)
+    writer, _ = writer_for(store, api)
+
+    ours = push_threshold(writer, store, SAT)
+    assert ours.action == "create" and ours.workout_id != hand_id
+
+    # A store that lost its ids must still find *our* row, not the athlete's.
+    amnesiac = fresh_store(tmp_path, "lost.json")
+    again = push_threshold(writer, amnesiac, SAT)
+    assert again.action == "noop"
+    assert again.workout_id == ours.workout_id
+    assert again.schedule_id == ours.schedule_id
+    assert amnesiac.get_push("u1")["workout_id"] == ours.workout_id
+    assert api.days() == [SAT, SAT], "no third copy, and theirs untouched"
+
+
+def test_a_dated_row_is_recognised_however_garmin_spells_the_key(tmp_path):
+    """A date key the writer does not recognise falls through to `create`,
+    which is a duplicate on the calendar. `scheduleDate` was one of them."""
+    assert writer_module._extract_date({"scheduleDate": SAT + "T00:00:00"}) \
+        == SAT
+    for key in ("calendarDate", "date", "scheduledDate",
+                "workoutScheduleDate", "scheduleDate"):
+        assert writer_module._extract_date({key: SAT}) == SAT
+
+
+# --- CHANGE 3: undo is a real stack -----------------------------------------
+
+
+def test_undo_walks_back_through_three_moves_to_the_coachs_plan(tmp_path):
+    """Three moves, three distinct undos, back where the coach put it — with
+    a push in the middle that no undo may disturb."""
+    store = fresh_store(tmp_path)
+    store.move_workout("u1", THU)
+    store.move_workout("u1", FRI)
+    store.record_push("u1", workout_id=111, schedule_id=222,
+                      scheduled_for=FRI, pushed_hash="h1")
+    store.move_workout("u1", SAT)
+    assert store.get_override("u1")["fields"]["date"] == SAT
+
+    undone = []
+    for expected in (FRI, THU):
+        entry = next(e for e in store.history(uid="u1") if e["undoable"])
+        undone.append(entry["entry_id"])
+        store.undo(entry["entry_id"])
+        assert store.get_override("u1")["fields"]["date"] == expected
+
+    entry = next(e for e in store.history(uid="u1") if e["undoable"])
+    undone.append(entry["entry_id"])
+    store.undo(entry["entry_id"])
+    assert store.get_override("u1")["fields"] == {}, "back on the coach's plan"
+
+    assert len(set(undone)) == 3, "each undo must take back a different edit"
+    assert not [e for e in store.history(uid="u1") if e["undoable"]], \
+        "and then there is nothing left to undo"
+
+    push = store.get_push("u1")
+    assert (push["workout_id"], push["schedule_id"], push["scheduled_for"],
+            push["pushed_hash"]) == (111, 222, FRI, "h1")
+
+
+def test_the_ownership_marker_is_stable_per_uid_and_strippable():
+    """The marker is the whole basis of "we wrote this", so it has to be
+    stable across runs, distinct per uid, survive a long title, and come
+    back off again before anything shows it to the athlete."""
+    marker = writer_module.push_marker("u1")
+    assert marker == writer_module.push_marker("u1"), "stable across calls"
+    assert marker != writer_module.push_marker("u2"), "and per uid"
+
+    name = writer_module.marked_workout_name("Threshold 3x12min", "u1")
+    assert writer_module.owns_workout(name, "u1")
+    assert not writer_module.owns_workout(name, "u2")
+    assert not writer_module.owns_workout("Threshold 3x12min", "u1"), \
+        "an unmarked workout is never ours"
+    assert writer_module.strip_marker(name) == "Threshold 3x12min"
+
+    # Garmin caps a workout name; the marker must not be what gets clipped.
+    long_name = writer_module.marked_workout_name("Endurance " * 40, "u1")
+    assert len(long_name) <= writer_module.MAX_WORKOUT_NAME
+    assert writer_module.owns_workout(long_name, "u1")
