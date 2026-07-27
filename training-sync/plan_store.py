@@ -60,6 +60,21 @@ ORPHAN_PRUNE_DAYS = 30
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+class _Unset:
+    """Sentinel for "the caller said nothing about this field".
+
+    Needed wherever None is a value in its own right rather than an absence:
+    on the Garmin push record None means *clear this id*, which is a very
+    different instruction from *leave the stored one alone*.
+    """
+
+    def __repr__(self):  # pragma: no cover - debugging aid
+        return "<unset>"
+
+
+UNSET = _Unset()
+
+
 class PlanStoreError(Exception):
     """Base class for store errors."""
 
@@ -294,26 +309,56 @@ class PlanStore:
             del history[: len(history) - HISTORY_LIMIT]
         return entry
 
+    def _undoable_entry_ids(self):
+        """Entry ids that may still be undone, read off the stored history.
+
+        Only the most recent *surviving* change per uid may be undone; anything
+        older has been superseded and undoing it would resurrect stale data on
+        top of newer edits. `history` reports this and `undo` enforces it from
+        the same computation, so the flag the UI shows can never disagree with
+        what the store will actually accept.
+
+        An undo writes a compensating entry rather than rewriting history, so
+        the entry it reversed is still sitting there with its `undoable` flag
+        set. Walking newest-first and stopping at the first flagged entry would
+        therefore keep offering a change that has already been taken back —
+        undoing it again does nothing, and the edit before it could never be
+        reached. Each compensation cancels the next older change to the same
+        uid instead, which makes Undo an actual stack: repeat it and you walk
+        back through the edits one at a time.
+        """
+        undoable = set()
+        seen = set()
+        cancelled = {}
+        for entry in reversed(self._state["history"]):
+            target = entry.get("uid")
+            if str(entry.get("action") or "").startswith("undo"):
+                # A compensation retires the change it reversed, not this one.
+                cancelled[target] = cancelled.get(target, 0) + 1
+                continue
+            if not entry.get("undoable"):
+                continue
+            if cancelled.get(target):
+                cancelled[target] -= 1
+                continue
+            if target is not None:
+                if target in seen:
+                    continue
+                seen.add(target)
+            undoable.add(entry.get("entry_id"))
+        return undoable
+
     def history(self, limit=50, uid=None):
         with self._lock:
+            undoable = self._undoable_entry_ids()
             entries = self._state["history"]
             if uid is not None:
                 entries = [e for e in entries if e.get("uid") == uid]
             entries = list(reversed(entries))[:limit]
-            # Only the most recent entry per uid may be undone; anything
-            # older has been superseded and undoing it would resurrect
-            # stale data on top of newer edits.
-            seen = set()
             out = []
             for entry in entries:
                 entry = copy.deepcopy(entry)
-                key = (entry.get("uid"), entry.get("action"))
-                target = entry.get("uid")
-                if entry["undoable"] and target is not None:
-                    if target in seen:
-                        entry["undoable"] = False
-                    seen.add(target)
-                del key
+                entry["undoable"] = entry.get("entry_id") in undoable
                 out.append(entry)
             return out
 
@@ -330,6 +375,10 @@ class PlanStore:
                 raise UnknownUid(f"no history entry {entry_id}")
             if not entry.get("undoable"):
                 raise PlanStoreError(f"history entry {entry_id} is not undoable")
+            if entry_id not in self._undoable_entry_ids():
+                raise PlanStoreError(
+                    f"history entry {entry_id} has been superseded by a newer "
+                    "change to the same workout; undo that one first")
 
             uid = entry.get("uid")
             action = entry.get("action", "")
@@ -346,7 +395,10 @@ class PlanStore:
             else:
                 current = self._state["workout_overrides"].get(uid)
                 if before is None:
-                    self._state["workout_overrides"].pop(uid, None)
+                    # The entry created the override, so undoing it removes
+                    # the override — but not the record of what is already on
+                    # Garmin. Same reasoning as clear_override.
+                    self._drop_override_locked(uid)
                 else:
                     restored = copy.deepcopy(before)
                     # Keep rev monotonic so stale-rev checks stay meaningful.
@@ -567,6 +619,11 @@ class PlanStore:
             elif kind == "alfred" and record.get("kind") != "user":
                 record["kind"] = "alfred"
 
+            # An edit revives a record that a cleared override had reduced to
+            # a bare Garmin tombstone: there is something of the user's on it
+            # again, so clear_override has real work to do next time.
+            record.pop("tombstone", None)
+
             record["rev"] = int(record.get("rev", 0)) + 1
             record["updated_at"] = _now()
 
@@ -616,6 +673,53 @@ class PlanStore:
                                   expected_rev=expected_rev, actor=actor,
                                   action="push_approve")
 
+    @staticmethod
+    def _is_tombstone(record):
+        """A record that holds nothing but the Garmin push identity."""
+        return bool(record) and bool(record.get("tombstone")) \
+            and not record.get("fields")
+
+    def _tombstone_for(self, uid, record):
+        """The residue of a dropped override: its Garmin ids and nothing else.
+
+        Returns None when there is nothing worth keeping, i.e. the workout was
+        never pushed, in which case the record really can go.
+        """
+        garmin = copy.deepcopy(record.get("garmin") or {})
+        if garmin.get("workout_id") is None and garmin.get("schedule_id") is None:
+            return None
+        tombstone = self._blank_override(uid, "system",
+                                         record.get("plan_snapshot"))
+        tombstone["garmin"] = garmin
+        tombstone["created_at"] = record.get("created_at") \
+            or tombstone["created_at"]
+        # Keep rev monotonic: an open editor still has to fail its stale-rev
+        # check after the override was cleared out from under it.
+        tombstone["rev"] = int(record.get("rev", 0)) + 1
+        tombstone["updated_at"] = _now()
+        tombstone["orphaned_since"] = record.get("orphaned_since")
+        tombstone["tombstone"] = True
+        return tombstone
+
+    def _drop_override_locked(self, uid):
+        """Remove a workout override, leaving a tombstone when Garmin holds a
+        copy. Returns whatever is left behind (None when the uid was dropped).
+
+        The push ids are not part of the user's edit — they are this app's
+        only handle on the session already sitting on the Garmin calendar.
+        Discarding them makes the next push take the `create` path and stack a
+        second copy on the Edge 520 that nothing here could ever remove.
+        """
+        record = self._state["workout_overrides"].get(uid)
+        if record is None:
+            return None
+        tombstone = self._tombstone_for(uid, record)
+        if tombstone is None:
+            self._state["workout_overrides"].pop(uid, None)
+            return None
+        self._state["workout_overrides"][uid] = tombstone
+        return tombstone
+
     def clear_override(self, uid, actor="user"):
         """Drop the whole override, reverting to the coach's plan.
 
@@ -624,10 +728,16 @@ class PlanStore:
         the caller can still unschedule it, and the UI can prompt to re-push.
         """
         with self._lock:
-            before = self._state["workout_overrides"].pop(uid, None)
-            if before is None:
+            record = self._state["workout_overrides"].get(uid)
+            if record is None:
                 return None
-            self._append_history("clear_override", uid, actor, before, None)
+            if self._is_tombstone(record):
+                # Nothing of the user's left to clear; what remains is the
+                # Garmin identity, which was never theirs to revert.
+                return copy.deepcopy(record)
+            before = copy.deepcopy(record)
+            after = self._drop_override_locked(uid)
+            self._append_history("clear_override", uid, actor, before, after)
             self._save_locked()
             return copy.deepcopy(before)
 
@@ -652,8 +762,8 @@ class PlanStore:
                 return None
             return copy.deepcopy(record.get("garmin"))
 
-    def record_push(self, uid, workout_id=None, schedule_id=None,
-                    scheduled_for=None, pushed_hash=None,
+    def record_push(self, uid, workout_id=UNSET, schedule_id=UNSET,
+                    scheduled_for=UNSET, pushed_hash=UNSET,
                     push_state="scheduled", error=None, actor="system",
                     plan_snapshot=None):
         """Persist what actually landed on Garmin.
@@ -662,10 +772,17 @@ class PlanStore:
         `unschedule_workout` takes the *schedule* id, while `delete_workout`
         takes the *workout* id. Storing only the workout id makes a move
         impossible to clean up and leaves duplicates on the Edge 520.
+
+        Each field follows the same patch semantics as `patch_workout`: omit
+        it to leave the stored value alone, pass None to *clear* it. Clearing
+        has to be sayable — after a reschedule the old schedule id is already
+        gone from Garmin, and keeping it means the next move tries to
+        unschedule an id that no longer exists, which Garmin refuses and which
+        strands the workout on the wrong day.
         """
         if push_state not in PUSH_STATES:
             raise InvalidValue(f"push_state must be one of {PUSH_STATES}")
-        if scheduled_for is not None:
+        if scheduled_for is not UNSET and scheduled_for is not None:
             _validate_date(scheduled_for, "scheduled_for")
 
         with self._lock:
@@ -677,13 +794,13 @@ class PlanStore:
                 record = copy.deepcopy(record)
 
             garmin = record.get("garmin") or {}
-            if workout_id is not None:
+            if workout_id is not UNSET:
                 garmin["workout_id"] = workout_id
-            if schedule_id is not None:
+            if schedule_id is not UNSET:
                 garmin["schedule_id"] = schedule_id
-            if scheduled_for is not None:
+            if scheduled_for is not UNSET:
                 garmin["scheduled_for"] = scheduled_for
-            if pushed_hash is not None:
+            if pushed_hash is not UNSET:
                 garmin["pushed_hash"] = pushed_hash
             garmin["push_state"] = push_state
             garmin["error"] = error

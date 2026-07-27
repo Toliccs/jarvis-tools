@@ -384,6 +384,7 @@ class PushResult:
 
 _WORKOUT_ID_KEYS = ("workoutId", "workout_id")
 _SCHEDULE_ID_KEYS = ("workoutScheduleId", "scheduleId", "workout_schedule_id")
+_NAME_KEYS = ("workoutName", "workout_name", "title")
 
 
 def _iter_dicts(obj):
@@ -442,6 +443,30 @@ def _extract_date(entry):
         if isinstance(value, str) and len(value) >= 10:
             return value[:10]
     return None
+
+
+def _first_id(entry, keys):
+    for key in keys:
+        found = _coerce_id(entry.get(key))
+        if found:
+            return found
+    return None
+
+
+def _extract_name(entry):
+    for key in _NAME_KEYS:
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _same_name(left, right):
+    """Workout names compared the way a person would read them."""
+    if not left or not right:
+        return False
+    return " ".join(str(left).split()).lower() == \
+        " ".join(str(right).split()).lower()
 
 
 # --- the writer -------------------------------------------------------------
@@ -621,6 +646,41 @@ class GarminWorkoutWriter:
                 return schedule_id
         return None
 
+    def find_scheduled_by_name(self, name, date, refresh=False):
+        """Find a workout of this name already on the calendar for `date`.
+
+        Returns `(workout_id, schedule_id)`, either of which may be None.
+        This is the identity check available when the local store has lost
+        its ids entirely: without a stored workout id there is nothing to
+        hand `find_schedule_id`, and the name plus the day is all Garmin's
+        calendar offers to recognise our own session by.
+
+        A calendar read that fails is not an error here — the caller falls
+        back to creating, which is the pre-existing behaviour.
+        """
+        if not name:
+            return (None, None)
+        _validate_date(date)
+        year, month = int(date[:4]), int(date[5:7])
+        try:
+            response = self.scheduled_in_month(year, month, refresh=refresh)
+        except GarminWriterError:
+            return (None, None)
+
+        for entry in _iter_dicts(response):
+            if _extract_date(entry) != date:
+                continue
+            # The name and the ids may sit on the calendar row itself or on a
+            # nested workout object, depending on the endpoint's shape.
+            workout_id = schedule_id = found_name = None
+            for node in _iter_dicts(entry):
+                workout_id = workout_id or _first_id(node, _WORKOUT_ID_KEYS)
+                schedule_id = schedule_id or _first_id(node, _SCHEDULE_ID_KEYS)
+                found_name = found_name or _extract_name(node)
+            if _same_name(found_name, name) and workout_id:
+                return (workout_id, schedule_id)
+        return (None, None)
+
     # -- the idempotent push --
 
     def push_workout(self, uid, title, date, steps=None, duration_s=None,
@@ -708,13 +768,27 @@ class GarminWorkoutWriter:
             result.schedule_id = old_schedule_id
             return result
 
+        pushed_hash = new_hash
         try:
             if result.action == "reschedule":
                 schedule_id = old_schedule_id
                 if not schedule_id and old_date:
-                    schedule_id = self.find_schedule_id(old_workout_id, old_date)
+                    # Recovering an id the store does not have: read the
+                    # calendar fresh rather than trust a cached month, which
+                    # may itself predate whatever lost the id.
+                    schedule_id = self.find_schedule_id(old_workout_id,
+                                                        old_date, refresh=True)
                 if schedule_id:
                     self.unschedule(schedule_id)
+                    if store:
+                        # That id is dead on Garmin from here on. Record it
+                        # now, because if the re-schedule below fails the
+                        # stored id would otherwise be a live grenade: the
+                        # next move would try to unschedule it, Garmin would
+                        # refuse, and the workout would be stuck on the wrong
+                        # day with no way back through the UI.
+                        store.record_push(uid, schedule_id=None,
+                                          push_state="pending")
                 new_schedule_id = self.schedule(old_workout_id, date)
                 result.workout_id = old_workout_id
                 result.schedule_id = new_schedule_id
@@ -728,7 +802,8 @@ class GarminWorkoutWriter:
                 stale_schedule = old_schedule_id
                 if not stale_schedule and old_date:
                     stale_schedule = self.find_schedule_id(old_workout_id,
-                                                           old_date)
+                                                           old_date,
+                                                           refresh=True)
                 if stale_schedule:
                     try:
                         self.unschedule(stale_schedule)
@@ -745,11 +820,31 @@ class GarminWorkoutWriter:
 
             else:  # create
                 # Guard against a store that lost its ids: if this exact
-                # workout is somehow already on that day, adopt it.
-                new_workout_id = self.upload(payload)
-                new_schedule_id = self.schedule(new_workout_id, date)
-                result.workout_id = new_workout_id
-                result.schedule_id = new_schedule_id
+                # workout is somehow already on that day, adopt it. Uploading
+                # a second copy would put the session on the Edge 520 twice,
+                # and only one of the two would be ours to remove afterwards.
+                adopted_id, adopted_schedule_id = self.find_scheduled_by_name(
+                    payload.get("workoutName"), date)
+                if adopted_id:
+                    result.action = "noop"
+                    result.workout_id = adopted_id
+                    result.schedule_id = (
+                        adopted_schedule_id
+                        or self.find_schedule_id(adopted_id, date))
+                    # We did not send that copy, so we do not know what is in
+                    # it. Leaving the hash unset makes the next push replace
+                    # it rather than trust content we never wrote.
+                    pushed_hash = None
+                    result.reason = (
+                        f"{payload.get('workoutName')} is already on your "
+                        f"Garmin calendar for {date}, so that copy was "
+                        "adopted rather than a second one sent."
+                    )
+                else:
+                    new_workout_id = self.upload(payload)
+                    new_schedule_id = self.schedule(new_workout_id, date)
+                    result.workout_id = new_workout_id
+                    result.schedule_id = new_schedule_id
 
             result.state = "done"
             if store:
@@ -758,7 +853,7 @@ class GarminWorkoutWriter:
                     workout_id=result.workout_id,
                     schedule_id=result.schedule_id,
                     scheduled_for=date,
-                    pushed_hash=new_hash,
+                    pushed_hash=pushed_hash,
                     push_state="scheduled",
                     plan_snapshot=plan_snapshot,
                 )

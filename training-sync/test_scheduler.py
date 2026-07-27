@@ -802,3 +802,358 @@ def test_plan_serialises_for_the_web_layer():
     assert payload["proposals"][0]["action"] == "move"
     assert payload["proposals"][0]["requires_approval"] is True
     assert payload["week_start"] == "2026-07-27"
+
+
+# ---------------------------------------------------------------------------
+# REGRESSIONS — THE OVERRIDE STORE AND THE GARMIN WRITER
+#
+# These cover the two modules either side of the engine: the local override
+# store and the only write path to Garmin Connect. Nothing here touches the
+# network — the writer is driven by a fake Garmin API that keeps a small model
+# of the calendar, and every store lives in a pytest tmp_path.
+# ---------------------------------------------------------------------------
+
+import garmin_workout_writer as writer_module  # noqa: E402
+import plan_store as store_module  # noqa: E402
+from plan_store import PlanStore  # noqa: E402
+
+
+class FakeGarminApi:
+    """Stands in for `garminconnect.Garmin`.
+
+    Keeps a tiny model of the Garmin calendar so the writer's create /
+    reschedule / adopt paths can be exercised for real: scheduling adds a row,
+    unscheduling removes it, and a duplicate shows up as two rows on one day —
+    which is exactly what the Edge 520 would display.
+
+    Two switches reproduce Garmin's flakier days:
+    `schedule_returns_id=False` answers a schedule call without the id, and
+    `expose_schedule_ids=False` also hides it from the calendar listing, so
+    the writer's `find_schedule_id` recovery genuinely misses.
+    """
+
+    def __init__(self, first_workout_id=999):
+        self.calendar = []          # rows the Edge would sync
+        self.templates = {}
+        self.calls = []
+        self.schedule_returns_id = True
+        self.expose_schedule_ids = True
+        self.fail_schedule = False
+        self._next_workout_id = first_workout_id
+        self._next_schedule_id = 5000
+
+    def upload_workout(self, payload):
+        workout_id = self._next_workout_id
+        self._next_workout_id += 1
+        self.templates[workout_id] = payload
+        self.calls.append(("upload", workout_id))
+        return {"workoutId": workout_id}
+
+    def schedule_workout(self, workout_id, date):
+        if self.fail_schedule:
+            raise RuntimeError("Garmin is having a moment")
+        schedule_id = self._next_schedule_id
+        self._next_schedule_id += 1
+        self.calls.append(("schedule", workout_id, date))
+        self.calendar.append({
+            "workoutId": workout_id,
+            "workoutScheduleId": schedule_id,
+            "date": date,
+            "title": (self.templates.get(workout_id) or {}).get("workoutName"),
+        })
+        if not self.schedule_returns_id:
+            return {"ok": True}
+        return {"workoutScheduleId": schedule_id}
+
+    def unschedule_workout(self, schedule_id):
+        self.calls.append(("unschedule", schedule_id))
+        row = next((r for r in self.calendar
+                    if r["workoutScheduleId"] == schedule_id), None)
+        if row is None:
+            raise RuntimeError(f"no scheduled workout {schedule_id}")
+        self.calendar.remove(row)
+        return {"ok": True}
+
+    def delete_workout(self, workout_id):
+        self.calls.append(("delete", workout_id))
+        self.templates.pop(workout_id, None)
+        return {"ok": True}
+
+    def get_scheduled_workouts(self, year, month):
+        prefix = f"{int(year):04d}-{int(month):02d}"
+        items = []
+        for row in self.calendar:
+            if not row["date"].startswith(prefix):
+                continue
+            row = dict(row)
+            if not self.expose_schedule_ids:
+                row.pop("workoutScheduleId")
+            items.append(row)
+        return {"calendarItems": items}
+
+    def days(self):
+        """The dates the head unit would show a session on, with repeats."""
+        return sorted(row["date"] for row in self.calendar)
+
+
+def fresh_store(tmp_path, name="state.json"):
+    return PlanStore(path=str(tmp_path / name))
+
+
+def writer_for(store, api=None):
+    api = api or FakeGarminApi()
+    writer = writer_module.GarminWorkoutWriter(client=api, store=store)
+    return writer, api
+
+
+def push_threshold(writer, store, date, uid="u1", duration_s=3600):
+    """The push the UI makes for a feed entry with no structure."""
+    return writer.push_workout(uid, "Threshold 3x12min", date,
+                               duration_s=duration_s, store=store)
+
+
+# --- DEFECT 1: clear_override must not destroy the Garmin identity ---------
+
+
+def test_clear_override_keeps_the_garmin_push_identity(tmp_path):
+    """"Revert to the coach's plan" drops the user's edit, not the record of
+    what is already on the device.
+
+    The push ids are not part of the override — they are the app's only handle
+    on the copy sitting on the Garmin calendar. Dropping them makes the next
+    push take the `create` path and stack a second session on the Edge 520
+    that nothing in the app can remove.
+    """
+    store = fresh_store(tmp_path)
+    store.move_workout("u1", SAT)
+    store.record_push("u1", workout_id=111, schedule_id=222,
+                      scheduled_for=SAT, pushed_hash="h1")
+
+    store.clear_override("u1")
+
+    assert store.get_override("u1")["fields"] == {}, "the user's edit must go"
+    push = store.get_push("u1")
+    assert push["workout_id"] == 111
+    assert push["schedule_id"] == 222
+    assert push["scheduled_for"] == SAT
+    assert push["pushed_hash"] == "h1"
+    assert "u1" in store.pushed_uids(), \
+        "the push flow must still know this workout is ours"
+
+
+def test_clear_override_drops_a_record_that_was_never_pushed(tmp_path):
+    """With nothing on Garmin there is nothing to remember: the record goes."""
+    store = fresh_store(tmp_path)
+    store.move_workout("u1", SAT)
+    assert store.clear_override("u1")["fields"]["date"] == SAT
+    assert store.get_override("u1") is None
+    assert store.clear_override("u1") is None, "still idempotent"
+
+
+def test_repush_after_a_revert_does_not_duplicate_on_the_calendar(tmp_path):
+    """The Edge-520 symptom, end to end: push, revert, push again.
+
+    The second push must recognise the workout as already scheduled and leave
+    the single existing copy alone, rather than uploading a second one beside
+    it.
+    """
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+
+    first = push_threshold(writer, store, SAT)
+    assert first.action == "create" and first.state == "done"
+
+    store.clear_override("u1")
+
+    second = push_threshold(writer, store, SAT)
+    assert second.action == "noop"
+    assert second.workout_id == first.workout_id
+    assert api.days() == [SAT], "the session must appear on the Edge once"
+
+
+def test_revert_then_move_reschedules_the_existing_copy(tmp_path):
+    """The same, with a new date: reschedule the template, never re-create."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+
+    first = push_threshold(writer, store, SAT)
+    store.clear_override("u1")
+    store.move_workout("u1", SUN)
+
+    second = push_threshold(writer, store, SUN)
+    assert second.action == "reschedule"
+    assert second.workout_id == first.workout_id
+    assert api.days() == [SUN]
+    assert [c for c in api.calls if c[0] == "upload"] == [("upload", 999)]
+
+
+# --- DEFECT 1b: the adoption guard on the create path ----------------------
+
+
+def test_create_adopts_a_workout_already_on_that_day(tmp_path):
+    """Belt and braces for a store that lost its ids anyway.
+
+    A quarantined state file leaves the app with no memory of the push while
+    the workout is still on the Garmin calendar. Uploading again would put a
+    second copy on the day, and unpush could only ever remove one of them.
+    """
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    first = push_threshold(writer, store, SAT)
+
+    amnesiac = fresh_store(tmp_path, "lost.json")
+    again = push_threshold(writer, amnesiac, SAT)
+
+    assert api.days() == [SAT], "no second copy may reach the calendar"
+    assert [c for c in api.calls if c[0] == "upload"] == [("upload", 999)]
+    assert again.state == "done"
+    assert again.workout_id == first.workout_id
+    assert again.schedule_id == first.schedule_id
+    assert amnesiac.get_push("u1")["workout_id"] == first.workout_id
+    assert "already on your Garmin calendar" in again.reason
+
+
+def test_create_still_uploads_when_the_day_holds_a_different_session(tmp_path):
+    """The guard is not a blanket "something is on that day" veto — a
+    different workout on the same day is not this one."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    writer.push_workout("u-other", "Endurance 2hr Z2", SAT, duration_s=7200,
+                        store=store)
+
+    result = push_threshold(writer, store, SAT)
+    assert result.action == "create" and result.state == "done"
+    assert result.workout_id != store.get_push("u-other")["workout_id"]
+    assert api.days() == [SAT, SAT]
+
+
+# --- DEFECT 4: undo() must honour its own supersession guard ---------------
+
+
+def test_a_superseded_history_entry_cannot_be_undone(tmp_path):
+    """Only the newest change to a workout may be undone.
+
+    `history()` says so, but it said it on a copy — the stored flag stayed
+    True, so `undo` accepted the older entry, and because its `before` was
+    None it deleted the whole override: the newer move and the Garmin ids
+    with it.
+    """
+    store = fresh_store(tmp_path)
+    store.move_workout("u1", THU)
+    store.move_workout("u1", FRI)
+    store.record_push("u1", workout_id=111, schedule_id=222,
+                      scheduled_for=FRI, pushed_hash="h1")
+
+    entries = store.history(uid="u1")
+    superseded = next(e for e in entries
+                      if e["action"] == "move" and not e["undoable"])
+
+    with pytest.raises(store_module.PlanStoreError):
+        store.undo(superseded["entry_id"])
+
+    assert store.get_override("u1")["fields"]["date"] == FRI
+    assert store.get_push("u1")["workout_id"] == 111
+
+
+def test_the_newest_change_is_still_undoable(tmp_path):
+    """The guard rejects superseded entries only — Undo still works."""
+    store = fresh_store(tmp_path)
+    store.move_workout("u1", THU)
+    store.move_workout("u1", FRI)
+
+    newest = next(e for e in store.history(uid="u1") if e["undoable"])
+    restored = store.undo(newest["entry_id"])
+    assert restored["fields"]["date"] == THU
+
+    # And after undoing it, the older move is the newest surviving change.
+    again = next(e for e in store.history(uid="u1") if e["undoable"])
+    assert again["action"] == "move"
+
+
+def test_undoing_a_first_edit_keeps_the_garmin_identity(tmp_path):
+    """The Undo button on a move toast, on a workout pushed since.
+
+    The entry's `before` is None because the move created the override, so the
+    undo removes it — but the push ids are not the user's edit and must
+    survive, for the same reason "revert to the coach's plan" leaves them.
+    """
+    store = fresh_store(tmp_path)
+    store.move_workout("u1", SAT)
+    store.record_push("u1", workout_id=111, schedule_id=222,
+                      scheduled_for=SAT, pushed_hash="h1")
+
+    entry = next(e for e in store.history(uid="u1") if e["undoable"])
+    store.undo(entry["entry_id"])
+
+    assert store.get_override("u1")["fields"] == {}
+    assert store.get_push("u1")["workout_id"] == 111
+    assert "u1" in store.pushed_uids()
+
+
+# --- DEFECT 5: a schedule id known to be dead must be cleared --------------
+
+
+def test_record_push_clears_an_id_only_when_asked(tmp_path):
+    """Omitting an id leaves it alone; passing None clears it — the same
+    patch semantics `patch_workout` already uses."""
+    store = fresh_store(tmp_path)
+    store.record_push("u1", workout_id=111, schedule_id=555,
+                      scheduled_for=SAT, pushed_hash="h1")
+
+    store.mark_push_failed("u1", "Garmin said no")
+    assert store.get_push("u1")["schedule_id"] == 555, "omitted stays put"
+
+    store.record_push("u1", schedule_id=None, push_state="pending")
+    push = store.get_push("u1")
+    assert push["schedule_id"] is None
+    assert push["workout_id"] == 111, "clearing one id leaves the other"
+    assert push["scheduled_for"] == SAT
+
+
+def test_a_reschedule_never_keeps_a_schedule_id_it_has_unscheduled(tmp_path):
+    """Garmin can accept a schedule call and answer without the new id.
+
+    The old id was unscheduled moments earlier, so keeping it means the next
+    move calls unschedule on an id that no longer exists, Garmin refuses, and
+    the workout is stuck on the wrong day with no way back through the UI.
+    """
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT)
+    assert store.get_push("u1")["schedule_id"] == 5000
+
+    api.schedule_returns_id = False
+    api.expose_schedule_ids = False
+    moved = push_threshold(writer, store, SUN)
+
+    assert moved.action == "reschedule" and moved.state == "done"
+    push = store.get_push("u1")
+    assert push["schedule_id"] is None, "a dead id must not be kept"
+    assert push["scheduled_for"] == SUN
+    assert push["workout_id"] == 999
+
+    # Recoverable: the next move works instead of raising on the dead id.
+    api.schedule_returns_id = True
+    api.expose_schedule_ids = True
+    again = push_threshold(writer, store, MON)
+    assert again.state == "done"
+    assert api.days() == [MON], "no copy left behind on the old day"
+
+
+def test_a_failed_reschedule_leaves_a_recoverable_state(tmp_path):
+    """The unschedule succeeded and the re-schedule then failed. The stored
+    id is gone from Garmin either way, so it must not be left behind to
+    strand the workout on the next attempt."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT)
+
+    api.fail_schedule = True
+    failed = push_threshold(writer, store, SUN)
+    assert failed.state == "failed"
+    assert store.get_push("u1")["schedule_id"] is None
+
+    api.fail_schedule = False
+    retry = push_threshold(writer, store, SUN)
+    assert retry.state == "done"
+    assert api.days() == [SUN]

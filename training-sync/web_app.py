@@ -77,13 +77,27 @@ PROPOSAL_REASONS = ("race_recovery", "missed_workouts", "availability_changed",
                     "readiness_low", "manual")
 PUSH_SELECT_MODES = ("push_approved", "explicit", "all_effective")
 
-# scheduler kinds -> the kinds the calendar UI knows how to draw.
+# scheduler kinds -> the kinds the calendar UI knows how to draw. One UI kind
+# per engine kind: a KEEP drawn as "SKIP" tells the athlete the opposite of the
+# sentence printed directly underneath it.
 _KIND_MAP = {
-    "MOVE": "move", "SWAP": "swap", "MERGE": "swap", "SHORTEN": "shorten",
-    "DOWNGRADE": "shorten", "DROP": "skip", "KEEP": "skip",
-    "NO_PROPOSAL": "move",
+    "MOVE": "move", "SWAP": "swap", "MERGE": "merge", "SHORTEN": "shorten",
+    "DOWNGRADE": "downgrade", "DROP": "skip", "KEEP": "keep",
+    "NO_PROPOSAL": "no_proposal",
 }
+# The engine's coarse action vocabulary (scheduler.KIND_TO_ACTION), used when a
+# proposal arrives without an explicit `action`.
+_ACTION_MAP = {
+    "MOVE": "move", "SWAP": "move", "MERGE": "move", "SHORTEN": "soften",
+    "DOWNGRADE": "soften", "DROP": "drop", "KEEP": "keep",
+    "NO_PROPOSAL": "keep",
+}
+_ACTIONS = ("move", "soften", "drop", "keep")
 _CONFIDENCE_MAP = {"NONE": 0.0, "LOW": 0.35, "MED": 0.65, "HIGH": 0.9}
+
+# Anything Alfred writes into a workout's own text is signed, so the athlete
+# can tell his coach's words from Alfred's — and so re-applying can't double it.
+ALFRED_MARK = "[Alfred]"
 
 
 # ---------------------------------------------------------------------------
@@ -166,22 +180,86 @@ def daterange(start, end):
         day += timedelta(days=1)
 
 
-def training_tz():
-    name = os.environ.get("TRAINING_TZ")
-    if name and ZoneInfo is not None:
+_TZ_LOCK = threading.Lock()
+_TZ_CACHE = {}
+
+
+def _zone(name):
+    """A named zone (with its DST rules), or None. Never a fixed offset."""
+    if not name or ZoneInfo is None:
+        return None
+    name = str(name).strip().lstrip(":")
+    if not name:
+        return None
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        return None
+
+
+def _system_zone():
+    """The machine's zone as a *zone*, not as the offset in force today.
+
+    `datetime.now().astimezone().tzinfo` looks like the local timezone but is
+    only ever a `timezone(timedelta(...))` snapshot of *this instant's* offset.
+    Applied to a date on the other side of a DST boundary it is wrong by an
+    hour, which lands a late-evening workout on the wrong day.
+    """
+    try:
+        with open("/etc/timezone", "r", encoding="utf-8") as handle:
+            zone = _zone(handle.read().strip())
+            if zone is not None:
+                return zone
+    except OSError:
+        pass
+    try:
+        link = os.path.realpath("/etc/localtime")
+        if "zoneinfo" in link:
+            zone = _zone(link.split("zoneinfo", 1)[1].lstrip("/"))
+            if zone is not None:
+                return zone
+    except OSError:
+        pass
+    if ZoneInfo is not None:
+        # A TZif file still carries the full transition table, so this keeps
+        # DST even when the zone has no name to look up.
         try:
-            return ZoneInfo(name)
+            with open("/etc/localtime", "rb") as handle:
+                return ZoneInfo.from_file(handle, key="local")
         except Exception:
             pass
-    return datetime.now().astimezone().tzinfo
+    return None
+
+
+def training_tz():
+    """The zone the athlete's calendar is written in.
+
+    `TRAINING_TZ` wins, then `TZ`, then the system zone. Every one of those is
+    resolved to a real zone so `astimezone()` picks the offset that applied on
+    the date being converted — a June evening keeps BST when it's read in
+    January.
+    """
+    key = (os.environ.get("TRAINING_TZ"), os.environ.get("TZ"))
+    with _TZ_LOCK:
+        cached = _TZ_CACHE.get(key)
+    if cached is not None:
+        return cached
+    zone = _zone(key[0]) or _zone(key[1]) or _system_zone()
+    if zone is None:
+        # Nothing on this machine names a zone (no tzdata, no /etc/localtime).
+        # Today's offset is all that's left; `tz_name()` says so out loud.
+        zone = datetime.now().astimezone().tzinfo or timezone.utc
+    with _TZ_LOCK:
+        _TZ_CACHE[key] = zone
+    return zone
 
 
 def tz_name():
-    name = os.environ.get("TRAINING_TZ")
-    if name:
-        return name
-    tz = datetime.now().astimezone().tzinfo
-    return str(getattr(tz, "key", None) or tz)
+    tz = training_tz()
+    key = getattr(tz, "key", None)
+    if key:
+        return key
+    return f"{tz} (fixed offset — set TRAINING_TZ)"
 
 
 def today_local():
@@ -992,7 +1070,12 @@ def build_effective_workout(entry, record, availability, today,
 
     garmin = (record or {}).get("garmin") or {}
     override_block = None
-    if record:
+    # A cleared override leaves a tombstone behind so the push ids survive
+    # (plan_store._drop_override_locked). That residue is Garmin bookkeeping,
+    # not one of the athlete's edits, and it is reported in `garmin` already.
+    # Presenting it as an override would leave "Revert to the coach's plan"
+    # offered on a workout that is already back on the coach's plan.
+    if record and not (record.get("tombstone") and not fields):
         override_block = {
             "kind": record.get("kind"),
             "fields": sorted(fields.keys()),
@@ -1155,10 +1238,201 @@ def _mark_double_booked(workouts_by_day):
 
 # ---------------------------------------------------------------------------
 # proposals
+#
+# A proposal is a *set* of operations, not one date change. A SWAP moves two
+# workouts; a MERGE folds one session into another and annotates the host; a
+# DOWNGRADE changes what the session is, not where it sits. Collapsing that to
+# `{"date": ...}` applies half of the suggestion — and for a swap, the half
+# that double-books the day the swap existed to clear. Everything below
+# carries the engine's whole operation set through the API, and the approve
+# handler applies it as one unit.
 # ---------------------------------------------------------------------------
 
 
-def _proposal_changes(proposal_dict):
+_INTENSITY_PHRASE = {
+    "REST": "rest day", "RECOVERY": "recovery spin", "ENDURANCE": "endurance ride",
+    "TEMPO": "tempo session", "THRESHOLD": "threshold session",
+    "VO2": "VO2 session", "RACE": "race", "UNKNOWN": "session",
+}
+
+
+def _intensity_phrase(name):
+    """"THRESHOLD" -> "threshold session", in the engine's own words when the
+    engine is loadable."""
+    if not name:
+        return None
+    module, _ = load_module("scheduler")
+    table = getattr(module, "INTENSITY_PHRASE", None) if module else None
+    if isinstance(table, dict):
+        for intensity, phrase in table.items():
+            if getattr(intensity, "name", None) == str(name).upper():
+                return phrase
+    return _INTENSITY_PHRASE.get(str(name).upper(), str(name).lower())
+
+
+_VERSION_SUFFIX_RE = re.compile(r"\s+—\s+\w+ version$")
+
+
+def _signed(text, line):
+    """Append one signed Alfred line to a workout's own text — once, so
+    re-applying the same change can't stack duplicates."""
+    body = (text or "").rstrip()
+    line = f"{ALFRED_MARK} {line}"
+    if line in body:
+        return body or None
+    return (body + "\n\n" + line) if body else line
+
+
+def _op_patch(op, workout, day_name=None):
+    """One engine ``Operation`` -> the sparse override patch that realises it.
+
+    Returns None when the operation asks for nothing this store can hold.
+    """
+    kind = str(op.get("op") or "")
+    uid = op.get("workout_uid")
+    if not uid:
+        return None
+    workout = workout or {}
+    title = workout.get("title") or op.get("title") or "this session"
+    current_date = workout.get("date") or op.get("from_date")
+    changes, notes = {}, []
+
+    if kind in ("reschedule", "schedule"):
+        to_date = op.get("to_date")
+        if to_date and to_date != current_date:
+            changes["date"] = to_date
+            changes["status"] = "moved"
+            notes.append(f"{title} moves to {day_name or to_date}")
+        if kind == "schedule" and to_date and to_date == current_date:
+            changes["status"] = "planned"
+
+        minutes = op.get("new_duration_min")
+        if minutes:
+            changes["duration_s"] = int(minutes) * 60
+            notes.append(f"cut to {int(minutes)} min")
+
+        intensity = op.get("new_intensity")
+        if intensity:
+            word = str(intensity).lower()
+            was = ((workout.get("classification") or {}).get("intensity")
+                   or "").upper()
+            # The store has no intensity field, so an easier session shows up
+            # where the athlete actually reads it — the title and the text —
+            # and therefore also on the Edge when he pushes it.
+            base_title = _VERSION_SUFFIX_RE.sub("", workout.get("title") or title)
+            eased = f"{base_title} — {word} version"
+            if eased != workout.get("title"):
+                changes["title"] = eased
+            line = (f"Do this as the {word} version — not the "
+                    f"{_intensity_phrase(was) or 'planned'} work above.")
+            described = _signed(workout.get("description"), line)
+            if described:
+                changes["description"] = described
+            notes.append(f"{word} version instead")
+
+    elif kind == "unschedule":
+        changes["status"] = "skipped"
+        notes.append(f"{title} comes off the calendar")
+
+    elif kind == "modify_note":
+        note = (op.get("note") or "").strip()
+        if not note:
+            return None
+        described = _signed(workout.get("description"), note)
+        if described:
+            changes["description"] = described
+        notes.append(f"{title}: {note}")
+
+    if not changes:
+        return None
+    summary = ", ".join(notes) if notes else None
+    return {"uid": uid, "op": kind, "from_date": op.get("from_date"),
+            "to_date": op.get("to_date"), "changes": changes,
+            "note": summary, "summary": summary}
+
+
+def _operation_patches(proposal_dict, calendar):
+    """The engine's operation list, translated in order into override patches.
+
+    Every operation is carried, not just the one that happens to belong to the
+    proposal's own workout — that is the difference between a swap that clears
+    the day and a swap that double-books it.
+    """
+    primary = proposal_dict.get("workout_uid")
+    kind = proposal_dict.get("kind")
+    patches = []
+    for op in proposal_dict.get("operations") or []:
+        uid = op.get("workout_uid")
+        workout = calendar.workout(uid) if uid else None
+        day = op.get("to_date")
+        patch = _op_patch(op, workout, _day_label(day))
+        if patch:
+            patches.append(patch)
+
+    # MERGE: the engine's single operation annotates the *host*, and it
+    # deliberately returns the week unchanged (scheduler.py:1809) — the folded
+    # session is already off the calendar there. Materialise that fold, or the
+    # session stays on its own day and the "one session" merge becomes two.
+    if kind == "MERGE" and not any(p["uid"] == primary for p in patches):
+        host_uid = next((p["uid"] for p in patches), None)
+        host = calendar.workout(host_uid) if host_uid else None
+        workout = calendar.workout(primary)
+        host_when = _day_label((host or {}).get("date")
+                               or proposal_dict.get("proposed_date"))
+        host_title = (host or {}).get("title") or "the other session"
+        line = (f"Folded into {host_title} on {host_when} — do it as part of "
+                f"that ride, not as a session of its own.")
+        changes = {"status": "skipped"}
+        described = _signed((workout or {}).get("description"), line)
+        if described:
+            changes["description"] = described
+        title = (workout or {}).get("title") or "this session"
+        patches.insert(0, {
+            "uid": primary, "op": "fold",
+            "from_date": proposal_dict.get("original_date"),
+            "to_date": (host or {}).get("date"),
+            "changes": changes,
+            "note": f"Folded into {host_title} on {host_when}",
+            "summary": f"{title} folds into {host_title} on {host_when}",
+        })
+    return patches
+
+
+def _day_label(day):
+    """"2026-08-07" -> "Friday". Dates the athlete reads, not ISO strings."""
+    if not day or not _DATE_RE.match(str(day)):
+        return day
+    try:
+        return _date.fromisoformat(str(day)).strftime("%A")
+    except ValueError:
+        return day
+
+
+def _merge_changes(patches, uid):
+    """The union of every patch aimed at one workout."""
+    changes = {}
+    for patch in patches:
+        if patch["uid"] == uid:
+            changes.update(patch["changes"])
+    return changes
+
+
+def _proposal_changes(proposal_dict, patches=None):
+    """The primary workout's field patch.
+
+    Derived from the operations when the engine gave any; the older
+    date/duration reading is kept as the fallback for a proposal that predates
+    them, and for engine kinds that carry no operations at all.
+    """
+    primary = proposal_dict.get("workout_uid")
+    if patches:
+        changes = _merge_changes(patches, primary)
+        if changes:
+            return changes
+        if any(patch["uid"] != primary for patch in patches):
+            # Every operation belongs to another workout (a MERGE host note).
+            # The primary is genuinely unchanged — don't invent a date for it.
+            return {}
     kind = proposal_dict.get("kind")
     changes = {}
     if proposal_dict.get("proposed_date") and kind in (
@@ -1175,6 +1449,11 @@ def engine_proposal_to_api(proposal_dict, reason, calendar):
     uid = proposal_dict.get("workout_uid")
     record = calendar.overrides.get(uid) or {}
     engine_id = str(proposal_dict.get("id") or "")
+    engine_kind = proposal_dict.get("kind")
+    patches = _operation_patches(proposal_dict, calendar)
+    action = proposal_dict.get("action")
+    if action not in _ACTIONS:
+        action = _ACTION_MAP.get(engine_kind, "move")
     return {
         # Deterministic: the same week re-proposed yields the same ids, so a
         # re-run can't duplicate or contradict a decision already made. The
@@ -1182,11 +1461,19 @@ def engine_proposal_to_api(proposal_dict, reason, calendar):
         "proposal_id": engine_id if engine_id.startswith("prp_")
         else f"prp_{engine_id or uuid.uuid4().hex[:16]}",
         "uid": uid,
-        "kind": _KIND_MAP.get(proposal_dict.get("kind"), "move"),
-        "engine_kind": proposal_dict.get("kind"),
+        "kind": _KIND_MAP.get(engine_kind, "move"),
+        "engine_kind": engine_kind,
+        # The engine's own word for what this does. `kind` is how it's drawn;
+        # `action` is what it means, and the two may not contradict.
+        "action": action,
         "from_date": proposal_dict.get("original_date"),
         "to_date": proposal_dict.get("proposed_date"),
-        "changes": _proposal_changes(proposal_dict),
+        "changes": _proposal_changes(proposal_dict, patches),
+        # Every operation, including the ones on *other* workouts. Approval
+        # applies the whole list or none of it.
+        "operations": patches,
+        "affects_uids": list(dict.fromkeys(
+            [p["uid"] for p in patches] + ([uid] if uid else []))),
         "rationale": proposal_dict.get("reason"),
         "rationale_details": proposal_dict.get("reason_details") or [],
         "tradeoff": proposal_dict.get("tradeoff"),
@@ -1208,8 +1495,18 @@ def engine_proposal_to_api(proposal_dict, reason, calendar):
 
 
 def generate_proposals(service, calendar, start, end, reason, context=None):
-    """Run the adjustment engine over a 21-day window. Any failure degrades
-    to an empty proposal set with a warning — never a 500."""
+    """Run the adjustment engine over a 21-day window.
+
+    Returns ``(proposals, unresolved, warnings, covered)``. ``covered`` is the
+    ``(start, end)`` the engine actually re-planned — it plans exactly one
+    Monday-anchored week, whatever range was asked for — or None when it
+    didn't run at all. Only that range may be superseded in the store: a
+    pending suggestion outside it was never reconsidered, so deleting it would
+    silently drop a decision the athlete hasn't made yet.
+
+    Any failure degrades to an empty proposal set with a warning — never a
+    500, and never a store write.
+    """
     warnings = []
     module, error = load_module("scheduler")
     if module is None:
@@ -1217,7 +1514,7 @@ def generate_proposals(service, calendar, start, end, reason, context=None):
             "code": "proposals_unavailable",
             "message": f"The adjustment engine isn't available ({error}).",
         })
-        return [], [], warnings
+        return [], [], warnings, None
 
     start_d, end_d = _date.fromisoformat(start), _date.fromisoformat(end)
     window_start = (start_d - timedelta(days=7)).isoformat()
@@ -1259,14 +1556,14 @@ def generate_proposals(service, calendar, start, end, reason, context=None):
             "message": redact(f"Alfred's adjustment rules aren't configured "
                               f"yet ({exc})."),
         })
-        return [], [], warnings
+        return [], [], warnings, None
     except Exception as exc:
         warnings.append({
             "code": "proposals_unavailable",
             "message": redact(f"The adjustment engine couldn't run "
                               f"({type(exc).__name__})."),
         })
-        return [], [], warnings
+        return [], [], warnings, None
 
     payload = plan.to_dict()
     proposals = [engine_proposal_to_api(p, reason, calendar)
@@ -1295,7 +1592,122 @@ def generate_proposals(service, calendar, start, end, reason, context=None):
             kept.append(proposal)
         proposals = kept
 
-    return proposals, unresolved, warnings
+    # The one week the engine anchored on, widened to cover every date it
+    # actually spoke about.
+    anchor = payload.get("week_start") or start
+    try:
+        anchor_d = _date.fromisoformat(anchor)
+    except (TypeError, ValueError):
+        anchor_d = start_d
+    anchor_d -= timedelta(days=anchor_d.weekday())
+    covered_start, covered_end = anchor_d, anchor_d + timedelta(days=6)
+    for item in proposals + unresolved:
+        for value in (item.get("from_date"), item.get("to_date")):
+            if not value or not _DATE_RE.match(str(value)):
+                continue
+            day = _date.fromisoformat(value)
+            covered_start = min(covered_start, day)
+            covered_end = max(covered_end, day)
+
+    if covered_start > start_d or covered_end < end_d:
+        warnings.append({
+            "code": "engine_note",
+            "message": (
+                f"I re-planned the week of "
+                f"{covered_start.strftime('%a')} {covered_start.day} "
+                f"{covered_start.strftime('%b')} — suggestions you haven't "
+                f"answered on other weeks are untouched."),
+        })
+
+    return (proposals, unresolved, warnings,
+            (covered_start.isoformat(), covered_end.isoformat()))
+
+
+# ---------------------------------------------------------------------------
+# unresolved sessions
+#
+# "I can't place this anywhere without breaking something" is an answer, not a
+# failure — and it's the answer that most needs to survive. The plan store
+# holds *decidable* proposals (pending / approved / rejected); a NO_PROPOSAL
+# is none of those and must never become approvable, so it lives here, beside
+# the plan cache, and is re-stated on every calendar read.
+# ---------------------------------------------------------------------------
+
+
+UNRESOLVED_LIMIT = 200
+
+
+def unresolved_path(service):
+    name = "demo_unresolved.json" if getattr(service, "demo", False) \
+        else "unresolved.json"
+    return os.path.join(STATE_DIR, name)
+
+
+def _unresolved_anchor(item):
+    return item.get("from_date") or item.get("to_date")
+
+
+def read_unresolved(service):
+    data = _read_json(unresolved_path(service), default={}) or {}
+    items = data.get("items")
+    return list(items) if isinstance(items, list) else []
+
+
+def save_unresolved(service, covered, items):
+    """Replace the unresolved set for the range the engine just re-planned.
+
+    Same rule as the proposals themselves: only the recomputed range is
+    superseded. An unanswered "I can't place this" on another week stays.
+    """
+    if not covered:
+        return read_unresolved(service)
+    start, end = covered
+    fresh_uids = {item.get("uid") for item in items or []}
+    kept = []
+    for existing in read_unresolved(service):
+        anchor = _unresolved_anchor(existing)
+        if anchor and start <= anchor <= end:
+            continue
+        if existing.get("uid") in fresh_uids:
+            continue
+        kept.append(existing)
+    merged = (kept + list(items or []))[-UNRESOLVED_LIMIT:]
+    try:
+        _atomic_write_json(unresolved_path(service),
+                           {"schema_version": 1, "saved_at": _utc_now(),
+                            "items": merged})
+    except OSError:
+        pass  # read-only state dir: the response still carries them
+    return merged
+
+
+def live_unresolved(service, calendar, start=None, end=None):
+    """The unresolved items still worth showing.
+
+    One is stale the moment its situation changes — the workout was moved by
+    hand, skipped, or has left the plan — so it's filtered out on read rather
+    than lingering as a permanent scar on the calendar.
+    """
+    out = []
+    for item in read_unresolved(service):
+        anchor = _unresolved_anchor(item)
+        if not anchor:
+            continue
+        if start and anchor < start:
+            continue
+        if end and anchor > end:
+            continue
+        workout = calendar.workout(item.get("uid")) if item.get("uid") else None
+        if workout is None:
+            continue
+        if workout.get("status") in ("skipped", "done"):
+            continue
+        if workout.get("date") != item.get("from_date"):
+            continue
+        item = dict(item, status="unresolved", requires_approval=True,
+                    title=item.get("title") or workout.get("title"))
+        out.append(item)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1377,6 +1789,64 @@ def demo_garmin_context(start, end):
     return {"start": start, "end": end, "readiness": readiness,
             "activities": activities, "scheduled": {},
             "training_status": "PRODUCTIVE", "fetched_at": _utc_now()}
+
+
+# ---------------------------------------------------------------------------
+# applying an approved proposal
+#
+# Approval is still only ever a local write: it materialises the proposal as
+# overrides and stops there. Nothing here goes near Garmin — push is a second,
+# separate consent.
+# ---------------------------------------------------------------------------
+
+
+def _conflicting_fields(record, changes):
+    """The fields the athlete set by hand that this patch would overwrite."""
+    if not record or record.get("kind") != "user":
+        return []
+    existing = record.get("fields") or {}
+    return sorted(key for key, value in (changes or {}).items()
+                  if key in existing and existing[key] != value)
+
+
+def _rollback_patches(store, applied):
+    """Undo the operations already written, newest first.
+
+    A half-applied swap is worse than no swap: one session moved, the other
+    left behind, and a double-booked day. If any operation can't be written,
+    every one before it is put back.
+    """
+    for uid, before, changes in reversed(applied):
+        try:
+            if before is None:
+                store.clear_override(uid, actor="system")
+                continue
+            fields = before.get("fields") or {}
+            # A key absent from the old record maps to None, which clears it.
+            restore = {key: fields.get(key) for key in changes}
+            store.patch_workout(uid, fields=restore,
+                                note=before.get("note") or "",
+                                kind=before.get("kind") or "alfred",
+                                actor="system", force=True,
+                                action="rollback_proposal")
+        except Exception:
+            # Best effort — a rollback failure must not mask the original
+            # error, which is what the athlete actually needs to read.
+            pass
+
+
+def proposal_patches(proposal):
+    """The stored proposal's operation patches, primary workout first."""
+    uid = proposal.get("uid")
+    out = []
+    for patch in proposal.get("operations") or []:
+        if not isinstance(patch, dict):
+            continue
+        if not patch.get("uid") or not patch.get("changes"):
+            continue
+        out.append(patch)
+    primary = [p for p in out if p["uid"] == uid]
+    return primary + [p for p in out if p["uid"] != uid]
 
 
 # ---------------------------------------------------------------------------
@@ -1578,25 +2048,38 @@ async def read_body(request):
 def _translate_store_error(exc, store_module):
     if store_module is None:
         return ApiError("source_unavailable", redact(str(exc)), status=500)
+    # Subclasses first; the PlanStoreError catch-all must stay last so a more
+    # specific match always wins. Without that final row a bare PlanStoreError
+    # — which the store raises for a refused undo — reaches the athlete as a
+    # 500 "something broke", when it is an ordinary, expected "no, not that
+    # one" that the UI should show as a normal message.
     mapping = [
         ("UnknownUid", "unknown_uid", 404),
         ("StaleRev", "stale_rev", 409),
         ("ProposalConflict", "proposal_conflict", 409),
         ("UnknownProposal", "unknown_uid", 404),
         ("InvalidValue", "invalid_range", 400),
+        ("PlanStoreError", "store_conflict", 409),
     ]
     for name, code, status in mapping:
         klass = getattr(store_module, name, None)
         if klass and isinstance(exc, klass):
-            message = redact(str(exc))
+            raw = redact(str(exc))
+            message = raw
             if code == "stale_rev":
                 # The store's own wording is a version number; the person
                 # reading it is a cyclist, not a programmer.
                 message = ("This workout changed in another tab since you "
                            "opened it. Reload the week and try again.")
+            elif code == "store_conflict":
+                # Likewise: the store names an entry id, the athlete thinks in
+                # terms of the change he just made.
+                message = ("There's a newer change to that workout, so this "
+                           "one can't be undone on its own. Undo the most "
+                           "recent change first.") if "superseded" in raw else raw
             return ApiError(code, message, status=status,
-                            detail={"store_message": redact(str(exc))}
-                            if code == "stale_rev" else None)
+                            detail={"store_message": raw}
+                            if code in ("stale_rev", "store_conflict") else None)
     return ApiError("source_unavailable", redact(str(exc)), status=500)
 
 
@@ -1716,6 +2199,8 @@ def create_app(demo=None):
         _mark_double_booked(by_day)
 
         proposals_by_day = {}
+        unresolved_by_day = {}
+        unresolved_all = []
         if include_proposals and calendar.store is not None:
             try:
                 for proposal in calendar.store.list_proposals(
@@ -1725,6 +2210,15 @@ def create_app(demo=None):
                         proposals_by_day.setdefault(day, []).append(proposal)
             except Exception:
                 pass
+        if include_proposals:
+            try:
+                unresolved_all = live_unresolved(service, calendar, start, end)
+            except Exception:
+                unresolved_all = []
+            for item in unresolved_all:
+                day = _unresolved_anchor(item)
+                if day:
+                    unresolved_by_day.setdefault(day, []).append(item)
 
         context = service.garmin_context(start, end)
 
@@ -1742,6 +2236,9 @@ def create_app(demo=None):
                 "availability": calendar.availability_for(key),
                 "workouts": workouts,
                 "proposals": proposals_by_day.get(key, []),
+                # Sessions the engine could not place. Not approvable, but
+                # never silent: an unsolvable week has to be visible.
+                "unresolved": unresolved_by_day.get(key, []),
                 "garmin": {
                     "readiness": (context.get("readiness") or {}).get(key),
                     "activities": activities,
@@ -1763,6 +2260,7 @@ def create_app(demo=None):
             # Top-level: an orphaned override can point at a date outside the
             # requested range, and must still be visible.
             "orphans": calendar.orphans(),
+            "unresolved": unresolved_all,
             "warnings": warnings,
         }
 
@@ -1779,6 +2277,10 @@ def create_app(demo=None):
                     status="pending", start=day, end=day) or []]
             except Exception:
                 proposals = []
+        try:
+            unresolved = live_unresolved(service, calendar, day, day)
+        except Exception:
+            unresolved = []
         planned_tss = sum(w["planned_tss"] for w in workouts
                           if isinstance(w.get("planned_tss"), (int, float)))
         return {
@@ -1786,6 +2288,7 @@ def create_app(demo=None):
             "availability": calendar.availability_for(day),
             "workouts": workouts,
             "proposals": proposals,
+            "unresolved": unresolved,
             "garmin": {
                 "readiness": (context.get("readiness") or {}).get(day),
                 "activities": (context.get("activities") or {}).get(day, []),
@@ -1938,23 +2441,40 @@ def create_app(demo=None):
                            status=400)
 
         calendar = EffectiveCalendar(service)
-        proposals, unresolved, warnings = generate_proposals(
+        proposals, unresolved, warnings, covered = generate_proposals(
             service, calendar, start, end, reason, body.get("context"))
 
         stored = proposals
-        if calendar.store is not None:
+        if calendar.store is not None and covered is not None:
             try:
-                # Regenerating replaces the *pending* set for the range;
-                # already decided ones are historical record.
+                # Regenerating replaces the *pending* set for the range the
+                # engine actually re-planned — which is one Monday-anchored
+                # week, not the range the month view asked for. Superseding
+                # the whole request would delete undecided suggestions the
+                # engine never reconsidered. Already decided ones are
+                # historical record either way.
                 stored = calendar.store.replace_pending_proposals(
-                    start, end, proposals)
+                    covered[0], covered[1], proposals)
             except Exception as exc:
                 warnings.append({"code": "proposals_unavailable",
                                  "message": redact(
                                      f"Couldn't save the proposals ({exc}).")})
 
+        # The "I couldn't place this" answers are persisted too — they are
+        # re-read on every calendar load, so they outlive the one toast.
+        try:
+            save_unresolved(service, covered, unresolved)
+        except Exception as exc:
+            warnings.append({"code": "proposals_unavailable",
+                             "message": redact(
+                                 f"Couldn't save the unplaceable sessions "
+                                 f"({exc}).")})
+
         return {
             "requested_at": _utc_now(),
+            "range": {"start": start, "end": end},
+            "replanned": {"start": covered[0], "end": covered[1]}
+            if covered else None,
             "proposals": stored,
             "unresolved": unresolved,
             "warnings": warnings,
@@ -1967,18 +2487,30 @@ def create_app(demo=None):
             parse_date(start, "start")
         if end:
             parse_date(end, "end")
+        if status == "unresolved":
+            # Not in the plan store by design: an unplaceable session is not a
+            # decidable proposal, and must never be approvable.
+            return {"proposals": [], "unresolved": live_unresolved(
+                service, EffectiveCalendar(service), start, end)}
         store = service.store_or_none()
         if store is None:
-            return {"proposals": []}
+            return {"proposals": [], "unresolved": []}
         try:
-            return {"proposals": store.list_proposals(
-                status=status or None, start=start, end=end) or []}
+            proposals = store.list_proposals(
+                status=status or None, start=start, end=end) or []
         except Exception:
-            return {"proposals": []}
+            proposals = []
+        try:
+            unresolved = live_unresolved(service, EffectiveCalendar(service),
+                                         start, end)
+        except Exception:
+            unresolved = []
+        return {"proposals": proposals, "unresolved": unresolved}
 
     @app.post("/api/proposals/{proposal_id}/approve")
     async def approve_proposal(proposal_id: str, request: Request):
         body = await read_body(request)
+        force = bool(body.get("force"))
         store = service.store
         store_module, _ = load_module("plan_store")
         calendar = EffectiveCalendar(service)
@@ -1986,25 +2518,116 @@ def create_app(demo=None):
         if proposal is None:
             raise ApiError("unknown_uid", "That suggestion no longer exists.",
                            status=404)
+
+        uid = proposal.get("uid")
+        if proposal.get("status") == "approved":
+            # Idempotent: re-approving must not re-apply the operations, or a
+            # double-click would move the swapped session a second time.
+            after = EffectiveCalendar(service)
+            return {"proposal": proposal, "workout": after.workout(uid),
+                    "workouts": [w for w in [after.workout(uid)] if w],
+                    "applied": []}
+        if proposal.get("status") == "rejected":
+            raise ApiError(
+                "proposal_conflict",
+                "You've already dismissed this suggestion.", status=409,
+                detail={"uid": uid})
+
+        patches = proposal_patches(proposal)
+        primary_changes = dict(proposal.get("changes") or {})
+        # The primary workout is written by the store when it marks the
+        # proposal approved; everything else is written here, in the engine's
+        # order, and the whole set stands or falls together.
+        secondary = [p for p in patches if p["uid"] != uid]
+        # A KEEP has nothing to write at all — "I left the race where it is"
+        # is an answer, not an edit. Approving it must not leave an empty
+        # override behind.
+        no_op = not primary_changes and not patches
+        before_primary = store.get_override(uid) if uid else None
+
+        if not force:
+            blocked = []
+            for patch in ([{"uid": uid, "changes": primary_changes}]
+                          + secondary):
+                if not patch["uid"] or not patch["changes"]:
+                    continue
+                record = (before_primary if patch["uid"] == uid
+                          else store.get_override(patch["uid"]))
+                fields = _conflicting_fields(record, patch["changes"])
+                if fields:
+                    blocked.append({"uid": patch["uid"], "fields": fields})
+            if blocked:
+                # Refused before the first write rather than discovered
+                # half-way through it.
+                names = []
+                for entry in blocked:
+                    workout = calendar.workout(entry["uid"]) or {}
+                    names.append(workout.get("title") or entry["uid"])
+                raise ApiError(
+                    "proposal_conflict",
+                    "You've already edited "
+                    + (" and ".join(names) if names else "this workout")
+                    + " by hand. Approving Alfred's version would overwrite "
+                      "your change — retry with force to accept it.",
+                    status=409,
+                    detail={"force": True, "uid": uid, "blocked": blocked})
+
+        applied = []
         try:
+            for patch in secondary:
+                before = store.get_override(patch["uid"])
+                store.patch_workout(
+                    patch["uid"], fields=dict(patch["changes"]),
+                    note=patch.get("note"), kind="alfred",
+                    plan_snapshot=calendar.snapshot_for(patch["uid"]),
+                    actor="user", force=force, action="approve_proposal")
+                applied.append((patch["uid"], before, dict(patch["changes"])))
             # Approving materialises the proposal into an override. It does
             # not push — approving a plan change and sending it to the device
             # are two separate consents.
             result = store.approve_proposal(
-                proposal_id, force=bool(body.get("force")), actor="user",
-                plan_snapshot=calendar.snapshot_for(proposal.get("uid")))
+                proposal_id, force=force, actor="user",
+                plan_snapshot=calendar.snapshot_for(uid))
         except Exception as exc:
+            _rollback_patches(store, applied)
             error = _translate_store_error(exc, store_module)
             if error.code == "proposal_conflict":
                 error.message = (
                     "You've already edited this workout by hand. Approving "
                     "Alfred's version would overwrite your change — retry with "
                     "force to accept it.")
-                error.detail = {"force": True, "uid": proposal.get("uid")}
+                error.detail = {"force": True, "uid": uid}
             raise error
+
+        if no_op and before_primary is None:
+            # The store materialises every approval as an override; for a KEEP
+            # that leaves an empty record with a bumped rev, which reads on the
+            # calendar as "Alfred changed this" when nothing changed.
+            record = store.get_override(uid)
+            if record is not None and not (record.get("fields") or {}) \
+                    and record.get("kind") == "alfred" \
+                    and (record.get("garmin") or {}).get("push_state") in (
+                        None, "never"):
+                try:
+                    store.clear_override(uid, actor="system")
+                    result["override"] = None
+                except Exception:
+                    pass
+
+        after = EffectiveCalendar(service)
+        touched = [p["uid"] for p in patches]
+        if uid and uid not in touched:
+            touched.append(uid)
         return {
             "proposal": result.get("proposal"),
-            "workout": EffectiveCalendar(service).workout(proposal.get("uid")),
+            "workout": after.workout(uid),
+            # A swap moves two sessions; the caller has to be able to redraw
+            # both, and to see that both actually moved.
+            "workouts": [w for w in (after.workout(u) for u in touched)
+                         if w is not None],
+            "applied": [{"uid": p["uid"], "op": p.get("op"),
+                         "summary": p.get("summary"),
+                         "changes": p.get("changes")} for p in patches],
         }
 
     @app.post("/api/proposals/{proposal_id}/reject")

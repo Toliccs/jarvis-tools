@@ -319,6 +319,22 @@ h1,h2,h3,h4,p{margin:0}
   border:1px solid var(--accent);border-radius:8px;padding:6px 8px;
 }
 .prop-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:2px}
+/* A multi-session change lists every session it touches: approving a swap is
+   one decision about two workouts, so both are on the card. */
+.prop-ops{font-size:12px;color:var(--ink-2);line-height:1.45}
+.prop-ops-h{font-weight:600;color:var(--ink);margin-bottom:1px}
+.prop-op{padding-left:2px}
+/* "I couldn't place this" is not a suggestion — it's amber, not accent, and it
+   carries no Approve button anywhere on it. */
+.card.proposal.unresolved{
+  border-color:var(--status-warning);
+  background:color-mix(in srgb,var(--status-warning) 9%,transparent);
+}
+.card.proposal.unresolved.selected{
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--status-warning) 26%,transparent),
+    var(--shadow-lift);
+}
+.card.proposal.unresolved .prop-q{border-color:var(--status-warning)}
 .ghost{
   border:1px dashed var(--ink-muted);border-radius:10px;padding:8px 10px;
   opacity:.55;font-size:12px;color:var(--ink-2);background:transparent;
@@ -956,9 +972,21 @@ function allWorkouts() {
   if (!S.cal) return [];
   return (S.cal.days || []).reduce((a, d) => a.concat(d.workouts || []), []);
 }
+/* Pending suggestions *and* the sessions Alfred couldn't place. The unplaceable
+   ones carry status "unresolved", so every `status === "pending"` filter below
+   ignores them — they are visible, never approvable. */
 function allProposals() {
   if (!S.cal) return [];
-  return (S.cal.days || []).reduce((a, d) => a.concat(d.proposals || []), []);
+  return (S.cal.days || []).reduce(
+    (a, d) => a.concat(d.proposals || [], d.unresolved || []), []);
+}
+function allUnresolved() {
+  if (!S.cal) return [];
+  return (S.cal.days || []).reduce((a, d) => a.concat(d.unresolved || []), []);
+}
+function selectedPending() {
+  return allProposals().find(
+    p => p.proposal_id === S.selectedProposal && p.status === "pending") || null;
 }
 function approvedCount() {
   return allWorkouts().filter(w => w.push_approved && w.status !== "skipped").length;
@@ -1262,6 +1290,7 @@ function dayColumn(date, isToday) {
 
   (day.proposals || []).filter(p => p.status === "pending")
     .forEach(p => zone.appendChild(proposalCard(p)));
+  (day.unresolved || []).forEach(p => zone.appendChild(proposalCard(p)));
 
   if (!zone.childNodes.length) {
     zone.appendChild(el("div", "emptyday", unavailable ? "Blocked out" : "Rest"));
@@ -1411,12 +1440,32 @@ function pushInfo(w) {
 }
 
 /* ----------------------------------------------------------- proposal card */
+/* One label per engine kind, in his words. The chip and the sentence under it
+   must never say different things: a KEEP labelled "SKIP" reads as the exact
+   opposite of "left where it is". */
+const KIND_LABEL = {
+  move: "MOVE", swap: "SWAP", merge: "FOLD IN", shorten: "SHORTEN",
+  downgrade: "EASIER", skip: "SKIP", keep: "KEEP",
+  no_proposal: "CAN'T PLACE"
+};
+const KIND_HINT = {
+  move: "Same session, different day.",
+  swap: "Two sessions trade days — they move together.",
+  merge: "Two sessions become one.",
+  shorten: "Same day, shorter.",
+  downgrade: "Same day, easier session than your coach planned.",
+  skip: "This session comes off the calendar.",
+  keep: "Nothing moves — this is Alfred saying it's your call, not his.",
+  no_proposal: "Alfred couldn't find a slot. Nothing has changed."
+};
+
 function proposalCard(p) {
-  const card = el("article", "card proposal");
+  const stuck = p.status === "unresolved";
+  const card = el("article", "card proposal" + (stuck ? " unresolved" : ""));
   if (S.selectedProposal === p.proposal_id) card.classList.add("selected");
   card.tabIndex = 0;
   card.dataset.proposal = p.proposal_id;
-  card.style.setProperty("--intensity", "var(--accent)");
+  card.style.setProperty("--intensity", stuck ? "var(--status-warning)" : "var(--accent)");
 
   const body = el("div", "card-body");
   body.appendChild(el("div", "card-bar"));
@@ -1428,10 +1477,16 @@ function proposalCard(p) {
   top.appendChild(el("h4", "card-title", p.title || "Suggested change"));
   main.appendChild(top);
 
+  const kind = p.kind || "move";
   const meta = el("div", "card-meta");
-  meta.appendChild(el("span", "chip accent", "✦ " + (p.kind || "move").toUpperCase()));
-  if (p.from_date && p.to_date) {
+  const chip = el("span", "chip " + (stuck ? "warn" : "accent"),
+    (stuck ? "⚠ " : "✦ ") + (KIND_LABEL[kind] || kind.toUpperCase()));
+  if (KIND_HINT[kind]) chip.title = KIND_HINT[kind];
+  meta.appendChild(chip);
+  if (p.from_date && p.to_date && p.to_date !== p.from_date) {
     meta.appendChild(el("span", null, shortDay(p.from_date) + " → " + shortDay(p.to_date)));
+  } else if (kind === "keep" && p.from_date) {
+    meta.appendChild(el("span", null, "stays on " + shortDay(p.from_date)));
   }
   if (p.conflicts_with_override) {
     const c = el("span", "chip warn", "You edited this");
@@ -1442,21 +1497,48 @@ function proposalCard(p) {
 
   // The reason, in his language. Mandatory and always rendered.
   main.appendChild(el("div", "prop-reason", p.rationale || "No reason given."));
+
+  // A swap moves two sessions. Both are listed here, because approving is one
+  // decision about all of them.
+  const ops = (p.operations || []).filter(o => o.summary);
+  if (ops.length > 1) {
+    const list = el("div", "prop-ops");
+    list.appendChild(el("div", "prop-ops-h", "This changes " + ops.length + " sessions:"));
+    ops.forEach(o => list.appendChild(el("div", "prop-op", "• " + o.summary)));
+    main.appendChild(list);
+  }
+
   if (p.tradeoff) main.appendChild(el("div", "card-note", p.tradeoff));
-  if (p.blocked_pending_input && p.question) {
-    main.appendChild(el("div", "prop-q", "Needs an answer first — " + p.question));
+  if (p.question) {
+    main.appendChild(el("div", "prop-q",
+      (p.blocked_pending_input ? "Needs an answer first — " : "") + p.question));
   }
 
   const acts = el("div", "prop-actions");
-  const ok = el("button", "btn sm accent", "✓ Approve");
-  ok.disabled = !!p.blocked_pending_input;
-  if (p.blocked_pending_input) ok.title = "Answer the question above first.";
-  ok.onclick = ev => { ev.stopPropagation(); approveProposal(p); };
-  const no = el("button", "btn sm", "✕ Reject");
-  no.onclick = ev => { ev.stopPropagation(); rejectProposal(p); };
+  if (stuck) {
+    // Nothing to approve: there is no suggestion, only the honest answer that
+    // the week can't absorb this. The two ways out are his to choose.
+    const skip = el("button", "btn sm", "Skip it");
+    skip.title = "Takes this session off the calendar for good.";
+    skip.onclick = ev => { ev.stopPropagation(); setStatus(p.uid, "skipped"); };
+    const leave = el("button", "btn sm", "Leave it");
+    leave.title = "Keeps the clash on the calendar so you can decide later.";
+    leave.onclick = ev => { ev.stopPropagation(); toast("Left as it is — it stays flagged until something changes."); };
+    acts.appendChild(skip); acts.appendChild(leave);
+  } else {
+    const isKeep = kind === "keep";
+    const ok = el("button", "btn sm accent", isKeep ? "✓ Got it" : "✓ Approve");
+    if (isKeep) ok.title = "Acknowledges Alfred's answer. Nothing on the calendar changes.";
+    ok.disabled = !!p.blocked_pending_input;
+    if (p.blocked_pending_input) ok.title = "Answer the question above first.";
+    ok.onclick = ev => { ev.stopPropagation(); approveProposal(p); };
+    const no = el("button", "btn sm", isKeep ? "✕ Dismiss" : "✕ Reject");
+    no.onclick = ev => { ev.stopPropagation(); rejectProposal(p); };
+    acts.appendChild(ok); acts.appendChild(no);
+  }
   const why = el("button", "btn sm", "Why?");
   why.onclick = ev => { ev.stopPropagation(); S.selectedProposal = p.proposal_id; S.railOpen = true; render(); };
-  acts.appendChild(ok); acts.appendChild(no); acts.appendChild(why);
+  acts.appendChild(why);
   main.appendChild(acts);
 
   body.appendChild(main);
@@ -1524,6 +1606,14 @@ function monthCell(date, inMonth, isToday) {
     c.style.color = "var(--accent)";
     c.appendChild(svg("g-spark", null));
     c.appendChild(el("span", "mt", "suggested"));
+    cell.appendChild(c);
+  }
+  if (day && (day.unresolved || []).length) {
+    const c = el("div", "mchip");
+    c.style.background = "color-mix(in srgb,var(--status-warning) 18%,transparent)";
+    c.style.color = "var(--ink)";
+    c.appendChild(el("span", "mt", "⚠ can't place"));
+    c.title = day.unresolved[0].rationale || "Alfred couldn't place this session.";
     cell.appendChild(c);
   }
 
@@ -1708,7 +1798,9 @@ function titleCase(s) {
 
 function rationalePanel(p) {
   const box = el("section", "rationale");
-  box.appendChild(el("div", "tile-h", "Why this move?"));
+  const heading = p.status === "unresolved" ? "Why nothing fits"
+    : (p.kind === "keep" ? "Why this stays put" : "Why this move?");
+  box.appendChild(el("div", "tile-h", heading));
   box.appendChild(el("div", "tile-sub", p.rationale || ""));
 
   (p.rationale_details || []).forEach(d => {
@@ -1716,6 +1808,13 @@ function rationalePanel(p) {
     s.textContent = "• " + d;
     box.appendChild(s);
   });
+
+  const ops = (p.operations || []).filter(o => o.summary);
+  if (ops.length) {
+    box.appendChild(el("div", "tile-h", ops.length > 1
+      ? "What approving changes (all of it, or none)" : "What approving changes"));
+    ops.forEach(o => box.appendChild(el("div", "tile-sub", "• " + o.summary)));
+  }
 
   const ev = el("div", "evidence");
   const push = (k, v) => {
@@ -1755,7 +1854,34 @@ function renderChangeBar() {
   const bar = $("#changebar");
   bar.textContent = "";
   const pending = allProposals().filter(p => p.status === "pending");
-  if (!pending.length) return;
+  const stuck = allUnresolved();
+  if (!pending.length && !stuck.length) return;
+
+  const jumpTo = p => {
+    S.selectedProposal = p.proposal_id;
+    S.railOpen = true;
+    render();
+    const c = document.querySelector('[data-proposal="' + cssEscape(p.proposal_id) + '"]');
+    if (c) { c.scrollIntoView({ block: "center", behavior: "smooth" }); c.focus(); }
+  };
+
+  // Nothing to approve, but something he needs to know about: an unsolvable
+  // week is visible on its own, not only alongside suggestions.
+  if (!pending.length) {
+    const b = el("div", "changebar");
+    const label = el("span");
+    label.appendChild(el("b", null, String(stuck.length)));
+    label.appendChild(document.createTextNode(
+      stuck.length === 1 ? " session I couldn't place"
+        : " sessions I couldn't place"));
+    b.appendChild(label);
+    b.appendChild(el("span", "spacer"));
+    const look = el("button", "btn sm", "Show me");
+    look.onclick = () => jumpTo(stuck[0]);
+    b.appendChild(look);
+    bar.appendChild(b);
+    return;
+  }
 
   const b = el("div", "changebar");
   b.appendChild(el("span", "dot"));
@@ -1763,17 +1889,15 @@ function renderChangeBar() {
   label.appendChild(el("b", null, String(pending.length)));
   label.appendChild(document.createTextNode(
     pending.length === 1 ? " suggested change" : " suggested changes"));
+  if (stuck.length) {
+    label.appendChild(document.createTextNode(
+      " · " + stuck.length + " I couldn't place"));
+  }
   b.appendChild(label);
   b.appendChild(el("span", "spacer"));
 
   const review = el("button", "btn sm", "Review");
-  review.onclick = () => {
-    S.selectedProposal = pending[0].proposal_id;
-    S.railOpen = true;
-    render();
-    const c = document.querySelector('[data-proposal="' + cssEscape(pending[0].proposal_id) + '"]');
-    if (c) { c.scrollIntoView({ block: "center", behavior: "smooth" }); c.focus(); }
-  };
+  review.onclick = () => jumpTo(pending[0]);
   const all = el("button", "btn sm accent", "Approve all");
   all.onclick = async () => {
     for (const p of pending) {
@@ -1918,7 +2042,9 @@ async function setAvailability(dates, state, reason, askAlfred, maxMinutes) {
       announce(longDay(list[0]) + " marked unavailable.");
       // Marking a day off flags the sessions on it — it never moves anything by
       // itself. Alfred proposes; nothing changes until it is approved.
-      if (askAlfred) await requestProposals("availability_changed");
+      // Ask about the week the blocked day is *in*: the engine plans one week
+      // at a time, and in month view the visible range starts weeks earlier.
+      if (askAlfred) await requestProposals("availability_changed", list[0]);
       else toast(list.length > 1 ? "Blocked out " + list.length + " " + longDay(list[0]) + "s." : longDay(list[0]) + " blocked out.");
     }
   } catch (e) {
@@ -1964,6 +2090,17 @@ async function moveWorkout(uid, toDate, allowUnavailable) {
     }
     toast(e.message, "bad");
   }
+}
+
+async function setStatus(uid, status) {
+  try {
+    await api("/api/workouts/" + encodeURIComponent(uid), {
+      method: "PATCH", body: { status: status }
+    });
+    await loadAll();
+    toast(status === "skipped" ? "Skipped — it won't be sent to your Edge."
+      : "Updated.");
+  } catch (e) { toast(e.message, "bad"); }
 }
 
 /* --------------------------------------------------------------- card menu */
@@ -2046,8 +2183,14 @@ function openCardMenu(w, anchor) {
 }
 
 /* -------------------------------------------------------------- proposals */
-async function requestProposals(reason) {
-  const r = viewRange();
+/* `focusDate` names the day that prompted the ask. Alfred plans a single
+   Monday-anchored week, so pointing him at the changed day's week is the
+   difference between an answer and silence — the month grid's own range can
+   start weeks before anything changed. */
+async function requestProposals(reason, focusDate) {
+  const r = focusDate
+    ? { start: mondayOf(focusDate), end: addDays(mondayOf(focusDate), 6) }
+    : viewRange();
   try {
     const res = await api("/api/proposals", {
       method: "POST", body: { start: r.start, end: r.end, reason: reason || "manual" }
@@ -2055,10 +2198,14 @@ async function requestProposals(reason) {
     await loadAll();
     const n = (res.proposals || []).length;
     const unresolved = (res.unresolved || []).length;
+    const stuckNote = unresolved === 1
+      ? " One session he couldn't place is flagged in amber."
+      : " " + unresolved + " sessions he couldn't place are flagged in amber.";
     if (n) {
       announce(n + " suggestions ready for review.");
-      toast(n === 1 ? "Alfred has a suggestion — approve or reject it below."
-        : "Alfred has " + n + " suggestions — nothing changes until you approve.");
+      toast((n === 1 ? "Alfred has a suggestion — approve or reject it below."
+        : "Alfred has " + n + " suggestions — nothing changes until you approve.")
+        + (unresolved ? stuckNote : ""));
     } else if (unresolved) {
       toast("Alfred couldn't find a good slot — see the flagged sessions.", "bad");
     } else {
@@ -2380,8 +2527,10 @@ document.addEventListener("keydown", ev => {
   if (k === "t") { S.table = !S.table; render(); }
   else if (k === "u") { const d = S.focusDate; if (d) toggleAvailability(d, document.querySelector('[data-date="' + d + '"] .dayhead') || document.body); }
   else if (k === "p") { if (approvedCount()) openPushDrawer(); }
-  else if (k === "a") { const p = allProposals().find(x => x.proposal_id === S.selectedProposal); if (p) approveProposal(p); }
-  else if (k === "r") { const p = allProposals().find(x => x.proposal_id === S.selectedProposal); if (p) rejectProposal(p); }
+  // Only a *pending* proposal is decidable — an unplaceable session has
+  // nothing to approve or reject, so the shortcuts skip it.
+  else if (k === "a") { const p = selectedPending(); if (p) approveProposal(p); }
+  else if (k === "r") { const p = selectedPending(); if (p) rejectProposal(p); }
   else if (ev.key === "?") { S.drawer = "help"; render(); }
 });
 
