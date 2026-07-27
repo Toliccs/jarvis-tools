@@ -1466,3 +1466,656 @@ def test_removal_waits_for_a_push_in_flight(live_client, monkeypatch):
     service._active_job = None
     ok(live_client.post(f"/api/workouts/{uid}/unpush"))
     assert live_client.garmin.rows == []
+
+
+# ---------------------------------------------------------------------------
+# D5 — the calendar panel re-implemented the reader and lost a whole envelope
+#
+# `garmin_scheduled` walked every dict in the response and pulled ids off
+# whichever one carried a date. Garmin's other shape is one node per *day*
+# holding that day's sessions: the sessions carry no date of their own, the
+# dated parent carries no ids, and the panel came back empty on every account
+# that answers that way. The writer owns the canonical reader; nothing here
+# gets a second opinion.
+# ---------------------------------------------------------------------------
+
+
+class NestedGarminCalendar(FakeGarminCalendar):
+    """The same fake account, answering in Garmin's nested envelope.
+
+    One node per day, sessions beneath it. The rows themselves are identical —
+    only the shape of the wrapper differs, which is the whole point: a reader
+    that handles one and not the other reports a different calendar for the
+    same account.
+    """
+
+    def get_scheduled_workouts(self, year, month):
+        prefix = "%04d-%02d" % (int(year), int(month))
+        self.calls.append(("list", prefix))
+        by_day = {}
+        for row in self.rows:
+            if not str(row["date"]).startswith(prefix):
+                continue
+            by_day.setdefault(row["date"], []).append({
+                "workoutId": row["workoutId"],
+                "workoutScheduleId": row["workoutScheduleId"],
+                "workoutName": row["workoutName"],
+            })
+        return {"calendarItems": [
+            {"calendarDate": day, "items": items}
+            for day, items in sorted(by_day.items())
+        ]}
+
+
+class UnreadableGarminCalendar(FakeGarminCalendar):
+    """An account whose calendar cannot be read right now.
+
+    Not the same fact as an empty calendar, and the difference is the whole
+    reason this class exists: one means "nothing is scheduled", the other
+    means "no answer", and a panel that renders both as a blank day tells the
+    athlete the first when the truth is the second.
+    """
+
+    def get_scheduled_workouts(self, year, month):
+        self.calls.append(("list", "%04d-%02d" % (int(year), int(month))))
+        raise RuntimeError("503 Service Unavailable")
+
+
+def nested_client(monkeypatch, calendar_class=NestedGarminCalendar):
+    """A `live_client` whose fake account answers in a given envelope shape."""
+    if TestClient is None:
+        pytest.skip("the HTTP tests need httpx installed (pip install httpx)")
+    monkeypatch.setenv("GARMIN_EMAIL", "rider@example.com")
+    monkeypatch.setenv("GARMIN_PASSWORD", "not-a-real-password")
+    garmin = calendar_class()
+    monkeypatch.setattr(
+        web_app.TrainingService, "plan",
+        lambda self, force=False: (web_app.demo_plan_entries(self), []))
+    monkeypatch.setattr(web_app.TrainingService, "garmin",
+                        lambda self, force=False: garmin)
+    client = TestClient(web_app.create_app(demo=False))
+    client.__enter__()
+    client.garmin = garmin
+    return client
+
+
+def scheduled_on(client, day):
+    return calendar(client, day, day)["days"][0]["garmin"]
+
+
+def test_the_garmin_panel_reads_the_nested_calendar_envelope(monkeypatch):
+    """D5: on an account answering in the nested shape the panel was silently
+    empty — inner rows carry no date so they were skipped, and the dated
+    parent carries no ids so it was skipped too."""
+    client = nested_client(monkeypatch)
+    try:
+        day = week2(1)
+        uid = calendar(client, day, day)["days"][0]["workouts"][0]["uid"]
+        module, _ = web_app.load_module("garmin_workout_writer")
+        marked = module.marked_workout_name(workout(client, uid)["title"], uid)
+        client.garmin.add(day, 999, 111, marked)
+        client.garmin.add(day, 7777, 222, "Sunday club run")
+        pretend_pushed(client.app.state.service.store, uid, day,
+                       workout_id=999, schedule_id=111)
+        garmin_reread(client)
+
+        block = scheduled_on(client, day)
+        rows = block["scheduled"]
+        assert [(r["workout_id"], r["title"]) for r in rows] == [
+            (999, workout(client, uid)["title"]), (7777, "Sunday club run")], \
+            "the nested envelope was read as an empty calendar"
+        assert block["scheduled_readable"] is True
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_a_garmin_id_stays_paired_with_the_name_on_its_own_row(monkeypatch):
+    """Two sessions on one day is a supported state. Reading "the first id
+    anywhere below the date" pairs one session's id with the other's name,
+    which is how a workout gets claimed from the wrong owner."""
+    client = nested_client(monkeypatch)
+    try:
+        day = week2(1)
+        uid = calendar(client, day, day)["days"][0]["workouts"][0]["uid"]
+        module, _ = web_app.load_module("garmin_workout_writer")
+        marked = module.marked_workout_name(workout(client, uid)["title"], uid)
+        client.garmin.add(day, 7777, 222, "Sunday club run")
+        client.garmin.add(day, 999, 111, marked)
+        pretend_pushed(client.app.state.service.store, uid, day,
+                       workout_id=999, schedule_id=111)
+        garmin_reread(client)
+
+        rows = {r["title"]: r for r in scheduled_on(client, day)["scheduled"]}
+        assert rows["Sunday club run"]["workout_id"] == 7777
+        assert rows["Sunday club run"]["schedule_id"] == 222
+        assert rows["Sunday club run"]["owned_by_us"] is False
+        ours = rows[workout(client, uid)["title"]]
+        assert (ours["workout_id"], ours["schedule_id"]) == (999, 111)
+        assert ours["owned_by_us"] is True
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_the_calendar_reader_is_not_re_implemented_in_the_web_app():
+    """The duplicate is deleted, not fixed in parallel. Two readers of the
+    same response is how the two answers drifted apart in the first place."""
+    with open(os.path.join(HERE, "web_app.py"), encoding="utf-8") as fh:
+        source = fh.read()
+    for private in ("_iter_dicts", "_extract_date", "_WORKOUT_ID_KEYS",
+                    "_SCHEDULE_ID_KEYS"):
+        assert f"module.{private}" not in source, \
+            f"web_app reaches into the writer's {private} instead of using " \
+            "its canonical reader"
+    assert "scheduled_rows" in source, \
+        "the panel must read the calendar through the writer's own reader"
+
+
+def test_a_garmin_calendar_that_could_not_be_read_is_not_shown_as_empty(
+        monkeypatch):
+    """"Nothing is scheduled" and "Garmin didn't answer" are different facts.
+    The panel renders both, so it has to be told which one it holds."""
+    client = nested_client(monkeypatch, UnreadableGarminCalendar)
+    try:
+        day = week2(1)
+        block = scheduled_on(client, day)
+        assert block["scheduled"] == []
+        assert block["scheduled_readable"] is False, \
+            "an unreadable month was reported as an empty day"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_an_empty_garmin_month_is_reported_as_read(monkeypatch):
+    """The other half of the same distinction: a month that really is empty
+    must not raise a "couldn't read your calendar" warning at the athlete."""
+    client = nested_client(monkeypatch)
+    try:
+        block = scheduled_on(client, week2(1))
+        assert block["scheduled"] == []
+        assert block["scheduled_readable"] is True
+    finally:
+        client.__exit__(None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# refusals: the writer now stops rather than acting on a calendar it could not
+# read, and the athlete has to be able to tell that apart from a breakage —
+# and from a success
+# ---------------------------------------------------------------------------
+
+
+def block_calendar_reads(client):
+    """Make the fake account stop answering month reads.
+
+    Exactly the state the writer's `CALENDAR_BLOCKED` describes: Garmin is
+    reachable enough to be asked and gives no usable answer, so nothing on
+    that day is known. Every write decision downstream must refuse.
+    """
+    def refuse(year, month):
+        client.garmin.calls.append(("list-failed", "%04d-%02d" % (year, month)))
+        raise RuntimeError("503 Service Unavailable")
+    client.garmin.get_scheduled_workouts = refuse
+    garmin_reread(client)
+
+
+def allow_calendar_reads(client):
+    del client.garmin.get_scheduled_workouts
+    garmin_reread(client)
+
+
+def test_a_removal_that_could_not_be_proved_safe_says_so_and_stays_retryable(
+        live_client, monkeypatch):
+    """The writer refuses a removal it cannot prove is safe. That refusal has
+    to arrive as "I didn't touch it, try again" — not as a cryptic error, and
+    emphatically not as a success — and it must leave the way back open."""
+    monkeypatch.setenv(web_app.ALLOW_GARMIN_WRITES_ENV, "1")
+    uid, day = a_pushed_session(live_client)
+    block_calendar_reads(live_client)
+
+    refused = live_client.post(f"/api/workouts/{uid}/unpush")
+    assert refused.status_code == 502, refused.text
+    body = refused.json()["error"]
+    assert "Couldn't confirm what's on your Garmin calendar" in body["message"]
+    assert "try again" in body["message"].lower()
+    assert body["detail"]["uid"] == uid
+    # The two facts the UI needs to keep the affordance and word the retry.
+    assert body["detail"]["still_on_garmin"] is True
+    assert body["detail"]["retryable"] is True
+
+    assert not [c for c in live_client.garmin.calls if c[0] == "unschedule"]
+    assert len(live_client.garmin.rows) == 1, "a refusal touched the calendar"
+    push = live_client.app.state.service.store.get_push(uid)
+    assert push and push["workout_id"] == 4242 and push["schedule_id"] == 8484, \
+        "the ids that can still remove the copy were forgotten"
+
+
+def test_a_refused_removal_leaves_the_session_removable(live_client,
+                                                        monkeypatch):
+    """The affordance is drawn off the workout payload. A refused removal used
+    to end with nothing on the card offering the way out, so the copy stayed
+    on the Edge with no route to it."""
+    monkeypatch.setenv(web_app.ALLOW_GARMIN_WRITES_ENV, "1")
+    uid, day = a_pushed_session(live_client)
+    block_calendar_reads(live_client)
+    assert live_client.post(f"/api/workouts/{uid}/unpush").status_code == 502
+
+    after = workout(live_client, uid)["garmin"]
+    assert after["on_garmin"] is True, "the Remove affordance is drawn on this"
+    assert after["workout_id"] == 4242 and after["schedule_id"] == 8484
+    removal = after["removal"]
+    assert removal["state"] == "failed"
+    assert removal["retryable"] is True
+    assert "Couldn't confirm what's on your Garmin calendar" in \
+        removal["message"]
+
+
+def test_a_refused_removal_is_not_reported_as_a_failed_push(live_client,
+                                                            monkeypatch):
+    """Both a refused push and a refused removal leave `push_state: failed` on
+    the record. Telling the athlete "push failed" about a removal points them
+    at the wrong button — Retry would send the session again."""
+    monkeypatch.setenv(web_app.ALLOW_GARMIN_WRITES_ENV, "1")
+    uid, _ = a_pushed_session(live_client)
+    block_calendar_reads(live_client)
+    assert live_client.post(f"/api/workouts/{uid}/unpush").status_code == 502
+
+    garmin = workout(live_client, uid)["garmin"]
+    assert garmin["removal"] and garmin["removal"]["state"] == "failed"
+    assert (garmin["removal"] or {}).get("action") == "unschedule"
+
+
+def test_a_successful_retry_clears_the_removal_refusal(live_client,
+                                                       monkeypatch):
+    """A read that failed is the kind of thing that stops failing. Once the
+    retry lands, the warning about the previous attempt has to go — a stale
+    "couldn't remove" on a session that is gone is its own lie."""
+    monkeypatch.setenv(web_app.ALLOW_GARMIN_WRITES_ENV, "1")
+    uid, _ = a_pushed_session(live_client)
+    block_calendar_reads(live_client)
+    assert live_client.post(f"/api/workouts/{uid}/unpush").status_code == 502
+    assert workout(live_client, uid)["garmin"]["removal"] is not None
+
+    allow_calendar_reads(live_client)
+    body = ok(live_client.post(f"/api/workouts/{uid}/unpush"))
+    assert body["result"]["state"] == "done"
+    assert live_client.garmin.rows == []
+    assert body["workout"]["garmin"]["removal"] is None
+    assert workout(live_client, uid)["garmin"]["removal"] is None
+
+
+def test_a_removal_of_a_session_this_app_cannot_prove_it_wrote_says_what_to_do(
+        live_client, monkeypatch):
+    """Stored ids are a place to look, not permission. Where the row on the
+    calendar carries no marker of ours, the refusal has to send the athlete to
+    Garmin Connect rather than tell them to try again here."""
+    monkeypatch.setenv(web_app.ALLOW_GARMIN_WRITES_ENV, "1")
+    day = week2(1)
+    uid = calendar(live_client, day, day)["days"][0]["workouts"][0]["uid"]
+    # A record pointing at a row that is not ours — an inherited state file,
+    # a restored backup, an id that outlived the workout it described.
+    live_client.garmin.add(day, 4242, 8484, "Club chaingang")
+    pretend_pushed(live_client.app.state.service.store, uid, day,
+                   workout_id=4242, schedule_id=8484)
+    garmin_reread(live_client)
+
+    refused = live_client.post(f"/api/workouts/{uid}/unpush")
+    assert refused.status_code == 502, refused.text
+    body = refused.json()["error"]
+    assert "prove it wrote" in body["message"]
+    assert "Garmin Connect" in body["message"]
+    # Not a "try again" — nothing here will ever remove it.
+    assert body["detail"]["retryable"] is False
+    assert len(live_client.garmin.rows) == 1
+    assert not [c for c in live_client.garmin.calls if c[0] == "unschedule"]
+    removal = workout(live_client, uid)["garmin"]["removal"]
+    assert removal["state"] == "failed" and removal["retryable"] is False
+
+
+def test_a_refused_push_reaches_the_card_in_the_writers_own_words(
+        live_client, monkeypatch):
+    """The writer refuses a create it cannot prove is safe and writes the
+    reason onto the push record. The card used to render every one of those as
+    a bare "✕ Push failed"."""
+    monkeypatch.setenv(web_app.ALLOW_GARMIN_WRITES_ENV, "1")
+    day = week2(1)
+    uid = calendar(live_client, day, day)["days"][0]["workouts"][0]["uid"]
+    approve_for_push(live_client, uid)
+    block_calendar_reads(live_client)
+
+    job = push(live_client, start=day, end=day, dry_run=False)
+    for _ in range(50):
+        job = ok(live_client.get(f"/api/push/{job['job_id']}"))
+        if job["state"] in ("done", "partial", "failed"):
+            break
+        time.sleep(0.05)
+    row = next(i for i in job["items"] if i["uid"] == uid)
+    assert row["state"] == "failed"
+    assert "couldn't read your Garmin calendar" in row["error"]["message"]
+
+    garmin = workout(live_client, uid)["garmin"]
+    assert garmin["push_state"] == "failed"
+    assert "couldn't read your Garmin calendar" in (garmin["error"] or ""), \
+        "the refusal never reached the card"
+    # Nothing was created, so there is nothing of ours to remove.
+    assert garmin["removal"] is None
+
+
+# ---------------------------------------------------------------------------
+# migration orphans — a Garmin copy the app can no longer manage
+#
+# The store refuses to inherit push identity it cannot vouch for. That is the
+# right call and it has a cost the athlete pays: a session left on their Garmin
+# calendar that nothing here will ever touch again, and that a later push will
+# stack a duplicate beside. Only they can remove it, so they have to be able to
+# see it — on the page, not in the JSON.
+# ---------------------------------------------------------------------------
+
+
+def orphaning_state_file(tmp_path, title="Threshold 3x12min",
+                         day="2026-08-04"):
+    """A state file holding push identity that cannot be accounted for — the
+    shape the pre-marker builds left behind."""
+    import json
+    path = tmp_path / "plan_state.json"
+    path.write_text(json.dumps({
+        "schema_version": 2,
+        "workout_overrides": {},
+        "garmin_push": {
+            "orphan@tp": {
+                "uid": "orphan@tp", "workout_id": 4242, "schedule_id": 8484,
+                "scheduled_for": day, "push_state": "scheduled",
+                "pushed_hash": None,
+                "plan_snapshot": {"title": title, "date": day},
+            },
+        },
+        "day_availability": {}, "proposals": [],
+        "rejected_signatures": [], "history": [],
+    }), encoding="utf-8")
+    return path
+
+
+def test_a_migration_orphan_carries_what_the_athlete_needs_to_find_it(
+        client, tmp_path, monkeypatch):
+    """`/api/status` forwarded the ids and the reason and dropped the title,
+    the day and the store's ready-to-show sentence — everything the athlete
+    would use to find the stray copy in Garmin Connect."""
+    path = orphaning_state_file(tmp_path)
+    monkeypatch.setattr(web_app, "DEMO_STATE_PATH", str(path))
+    service = client.app.state.service
+    service._store = None
+
+    store = ok(client.get("/api/status"))["store"]
+    assert store["migration_dropped"] == 1
+    note = store["migration_notes"][0]
+    assert note["uid"] == "orphan@tp"
+    assert note["title"] == "Threshold 3x12min"
+    assert note["scheduled_for"] == "2026-08-04"
+    assert note["workout_id"] == 4242
+    assert "Garmin Connect" in note["message"]
+
+
+def test_a_clean_state_file_reports_no_migration_orphans(client):
+    store = ok(client.get("/api/status"))["store"]
+    assert store["migration_dropped"] == 0
+    assert store["migration_notes"] == []
+
+
+# ---------------------------------------------------------------------------
+# the page's own decisions
+#
+# `static/index.html` carries a marked block of pure functions — the ones that
+# decide what the athlete is *told*, separately from how it is drawn. They are
+# lifted out verbatim and run under node here, so the sentences on the card
+# have a regression test behind them and not just a code review.
+# ---------------------------------------------------------------------------
+
+
+import json  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+
+UI_LOGIC_START = "/* --8<-- ui-logic-start --8<-- */"
+UI_LOGIC_END = "/* --8<-- ui-logic-end --8<-- */"
+
+
+def ui_logic_source():
+    with open(os.path.join(HERE, "static", "index.html"),
+              encoding="utf-8") as fh:
+        page = fh.read()
+    assert UI_LOGIC_START in page and UI_LOGIC_END in page, \
+        "the page lost its extractable ui-logic block"
+    body = page.split(UI_LOGIC_START, 1)[1].split(UI_LOGIC_END, 1)[0]
+    for forbidden in ("document.", "window.", "fetch(", "S."):
+        assert forbidden not in body, \
+            f"the ui-logic block must stay pure — found {forbidden!r}"
+    return body
+
+
+def ui_call(expression):
+    """Evaluate one call against the page's own decision functions."""
+    node = shutil.which("node")
+    if node is None:  # pragma: no cover - dev dependency only
+        pytest.skip("the UI-logic tests need node on PATH")
+    script = ui_logic_source() + "\nconsole.log(JSON.stringify(" \
+        + expression + " === undefined ? null : " + expression + "));\n"
+    result = subprocess.run([node, "-e", script], capture_output=True,
+                            text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip())
+
+
+def a_workout(**garmin):
+    return {"uid": "u1", "title": "Threshold", "status": "planned",
+            "push_approved": False, "garmin": dict(
+                {"workout_id": None, "schedule_id": None, "push_state": "never",
+                 "error": None, "on_garmin": False, "removal": None}, **garmin)}
+
+
+def test_a_refused_removal_reads_as_a_removal_and_keeps_the_way_out():
+    """The card is drawn off `pushInfo`. A refused removal leaves exactly the
+    same `push_state: failed` on the record as a refused push, so reading only
+    that said "✕ Push failed" and offered Retry — which would have sent the
+    session again, the opposite of what he asked for."""
+    workout_json = json.dumps(a_workout(
+        workout_id=4242, schedule_id=8484, on_garmin=True,
+        push_state="failed",
+        error="Couldn't confirm what's on your Garmin calendar for 2026-08-04.",
+        removal={"state": "failed", "action": "unschedule", "retryable": True,
+                 "message": "Couldn't confirm what's on your Garmin calendar "
+                            "for 2026-08-04, so nothing was removed. Try "
+                            "again in a moment."}))
+    info = ui_call(f"pushInfo({workout_json}, null)")
+
+    assert info["cls"] == "bad"
+    assert "Couldn't take it off Garmin" in info["text"]
+    assert "nothing was removed" in info["text"]
+    assert "Push failed" not in info["text"]
+    # The affordance survives the refusal — this is the only thing on screen
+    # pointing at a copy that is still on the athlete's calendar.
+    assert info["remove"] is True
+    assert info["removeLabel"] == "Try again"
+    assert not info.get("retry"), "Retry here would send the session again"
+
+
+def test_an_unprovable_removal_still_offers_the_way_out():
+    """Retrying will refuse again — but if he clears it in Garmin Connect the
+    retry is what lets this app catch up and forget its record. The affordance
+    never disappears on a failure."""
+    workout_json = json.dumps(a_workout(
+        workout_id=4242, schedule_id=8484, on_garmin=True, push_state="failed",
+        removal={"state": "failed", "action": "unschedule", "retryable": False,
+                 "message": "Nothing was removed: the session on your Garmin "
+                            "calendar isn't one this app can prove it wrote. "
+                            "Remove it in Garmin Connect if you want it gone."}))
+    info = ui_call(f"pushInfo({workout_json}, null)")
+    assert info["remove"] is True
+    assert info["retryable"] is False
+    assert "Garmin Connect" in info["text"]
+
+
+def test_a_refused_push_is_shown_in_the_writers_own_words():
+    workout_json = json.dumps(a_workout(
+        push_state="failed",
+        error="Not sent: this app couldn't read your Garmin calendar for "
+              "2026-08-04, so it can't tell whether a copy is already on it. "
+              "Try again in a moment."))
+    info = ui_call(f"pushInfo({workout_json}, null)")
+    assert "couldn't read your Garmin calendar" in info["text"]
+    assert info["retry"] is True
+
+
+def test_the_unchanged_push_states_still_read_the_same_way():
+    """The refusal branches are additions, not a rewrite."""
+    assert ui_call(
+        'pushInfo(%s, null)' % json.dumps(a_workout(
+            workout_id=1, on_garmin=True, push_state="scheduled"))
+    )["text"].startswith("✓ On Garmin")
+    skipped = dict(a_workout(workout_id=1, on_garmin=True,
+                             push_state="scheduled"), status="skipped")
+    info = ui_call("pushInfo(%s, null)" % json.dumps(skipped))
+    assert info["remove"] is True
+    assert "still on your Garmin calendar" in info["text"]
+    assert ui_call("pushInfo(%s, null)" % json.dumps(a_workout())) is None
+
+
+def test_an_unreadable_garmin_day_does_not_read_as_a_clear_one():
+    """The panel's one unforgivable answer is "nothing is on your calendar"
+    when the truth is "this app has no idea". The day still has to carry a
+    mark of its own — without it an unanswered day is drawn like a clear one."""
+    panel = ui_call('garminPanel({"garmin": {"scheduled": [], '
+                    '"scheduled_readable": false}})')
+    assert panel["state"] == "unreadable"
+    assert panel["text"] == "Garmin calendar unread"
+
+    assert ui_call('garminPanel({"garmin": {"scheduled": [], '
+                   '"scheduled_readable": true}})') is None
+
+
+def test_an_unreadable_month_is_explained_once_and_not_seven_times():
+    """The calendar is read a month at a time, so one failed read blanks every
+    day on screen. The explanation and the way out belong in one banner."""
+    days = ", ".join(
+        '{"date": "2026-08-%02d", "garmin": {"scheduled_readable": false}}' % d
+        for d in range(3, 10))
+    notices = ui_call("calendarNotices({\"days\": [%s]})" % days)
+    assert len(notices) == 1
+    assert "Couldn't read your Garmin calendar" in notices[0]["title"]
+    assert "not evidence the day is clear" in notices[0]["body"]
+    assert "refused rather than risk a second copy" in notices[0]["body"]
+    assert len(notices[0]["days"]) == 7
+
+    assert ui_call('calendarNotices({"days": [{"date": "2026-08-03", '
+                   '"garmin": {"scheduled_readable": true}}]})') == []
+    assert ui_call("calendarNotices(null)") == []
+
+
+def test_the_garmin_panel_separates_our_copies_from_his_own():
+    panel = ui_call(
+        'garminPanel({"garmin": {"scheduled_readable": true, "scheduled": ['
+        '{"title": "Threshold", "owned_by_us": true},'
+        '{"title": "Club chaingang", "owned_by_us": false}]}})')
+    assert panel["state"] == "read"
+    assert panel["text"] == "2 sessions on Garmin"
+    assert panel["rows"][0] == {"title": "Threshold", "ours": True,
+                                "note": "sent from here"}
+    assert panel["rows"][1]["ours"] is False
+    assert "not this app's" in panel["rows"][1]["note"]
+
+
+def test_the_page_tells_the_athlete_about_a_migration_orphan():
+    """A dropped push identity leaves a session on his Garmin calendar that
+    nothing here will ever touch again. It cannot live in /api/status and
+    nowhere else — he is the only one who can remove it."""
+    status = json.dumps({"store": {"migration_dropped": 1, "migration_notes": [
+        {"uid": "orphan@tp", "title": "Threshold 3x12min",
+         "scheduled_for": "2026-08-04",
+         "message": "Threshold 3x12min on 2026-08-04 may still be on your "
+                    "Garmin calendar. Check that day in Garmin Connect."}]}})
+    notices = ui_call(f"storeNotices({status})")
+    assert len(notices) == 1
+    notice = notices[0]
+    assert "can no longer manage" in notice["title"]
+    assert "Garmin Connect" in notice["body"]
+    assert notice["items"][0]["title"] == "Threshold 3x12min"
+    assert notice["items"][0]["date"] == "2026-08-04"
+
+    assert ui_call('storeNotices({"store": {"migration_dropped": 0, '
+                   '"migration_notes": []}})') == []
+
+
+def test_the_page_script_still_parses():
+    """The page is one file with no build step, so a stray brace ships. The
+    tests above run a slice of it; this runs the parser over the whole thing."""
+    node = shutil.which("node")
+    if node is None:  # pragma: no cover - dev dependency only
+        pytest.skip("the UI-logic tests need node on PATH")
+    with open(os.path.join(HERE, "static", "index.html"),
+              encoding="utf-8") as fh:
+        page = fh.read()
+    script = page.split("<script>", 1)[1].rsplit("</script>", 1)[0]
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8",
+                                     delete=False) as fh:
+        fh.write(script)
+        checked = fh.name
+    try:
+        result = subprocess.run([node, "--check", checked],
+                                capture_output=True, text=True, timeout=30)
+    finally:
+        os.unlink(checked)
+    assert result.returncode == 0, result.stderr
+
+
+def test_an_unconfigured_garmin_account_is_not_reported_as_an_unread_calendar(
+        client):
+    """Demo mode, and any app with no Garmin login, has no calendar to read.
+    Saying "couldn't read your Garmin calendar" there is a second, scarier
+    version of the "Garmin isn't connected" banner that already covers it."""
+    day = week2(1)
+    block = calendar(client, day, day)["days"][0]["garmin"]
+    assert block["scheduled"] == []
+    assert block["scheduled_readable"] is True
+
+
+def test_a_real_app_with_no_garmin_session_says_so_once_not_per_day(
+        live_client, monkeypatch):
+    """Same rule off the demo path: no session means the source banner, not a
+    warning on every day in view."""
+    monkeypatch.setattr(web_app.TrainingService, "garmin",
+                        lambda self, force=False: None)
+    garmin_reread(live_client)
+    day = week2(1)
+    block = calendar(live_client, day, day)["days"][0]["garmin"]
+    assert block["scheduled"] == []
+    assert block["scheduled_readable"] is True
+
+
+def test_a_login_failure_is_not_reported_per_day_as_an_unread_calendar(
+        live_client, monkeypatch):
+    """A session-level failure is one reconnect banner, not a warning on every
+    day in view. The writer keeps the two apart; so must this."""
+    module, _ = web_app.load_module("garmin_workout_writer")
+    writer = live_client.app.state.service.writer()
+
+    def expired():
+        raise module.GarminAuthFailed("your Garmin session has expired")
+
+    # What an expired session really looks like: the calendar call never
+    # happens, because the session behind it could not be re-established.
+    monkeypatch.setattr(writer, "_ensure_api", expired)
+    garmin_reread(live_client)
+    day = week2(1)
+    block = calendar(live_client, day, day)["days"][0]["garmin"]
+    assert block["scheduled"] == []
+    assert block["scheduled_readable"] is True, \
+        "an expired login was reported as an unreadable calendar per day"
+
+
+def test_a_stale_removal_warning_goes_when_the_copy_does():
+    """The badge says "couldn't take it off". Once nothing of ours is on the
+    calendar there is nothing left to fail to remove, and the warning would be
+    worse than silence."""
+    gone = a_workout(on_garmin=False, push_state="never",
+                     removal={"state": "failed", "action": "unschedule",
+                              "retryable": True, "message": "..."})
+    assert ui_call("pushInfo(%s, null)" % json.dumps(gone)) is None

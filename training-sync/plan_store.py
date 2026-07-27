@@ -26,12 +26,13 @@ Design rules that the rest of the app depends on:
   method touches the push map at all.
 - A stored id is only ever a *claim on somebody's calendar*, so it has to be
   earned. Every id written under this schema was proved ours at push time by
-  the ownership marker the writer puts in the workout name. Ids inherited
-  from an older file were not: the schema they came from adopted a Garmin
-  workout on a title match, so one of them can be the athlete's own session.
-  `_migrate` therefore validates identity on the way in and drops what it
-  cannot vouch for — see its docstring for the two rules and why forgetting
-  is the safe direction.
+  the ownership marker the writer puts in the workout name, and `record_push`
+  stamps that fact onto the record itself. Ids inherited from an older file
+  carry no such stamp: the schema they came from adopted a Garmin workout on
+  a title match, so one of them can be the athlete's own session. Every load
+  therefore re-checks the evidence each record carries and drops what it
+  cannot vouch for — see `_validate_push_identity` for the two rules, and
+  `_disown` for what a drop actually costs.
 - Writes are atomic: serialize to a temp file in the same directory, fsync,
   then os.replace(). A crash mid-write can never leave a torn state file.
 - Every mutation appends to an audit log so the last change per workout can
@@ -60,6 +61,15 @@ DEFAULT_STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 # v2 lifted the Garmin push identity out of every override record and into
 # its own top-level map. `_migrate` carries a v1 file forward on load.
+#
+# Deliberately *not* bumped for the identity-proof field below, and nothing in
+# `_validate_push_identity` reads this number. Keying that check on the version
+# is what made the previous attempt a no-op: the build that first shipped v2
+# writes this stamp and validates nothing, so a file it had touched arrived
+# claiming to have been checked. A number in the file is written by whichever
+# build wrote the file last, and that build is exactly the thing under
+# suspicion. `identity_proof` is per-record and additive; an older build
+# preserves it verbatim, so a downgrade and back costs nothing.
 SCHEMA_VERSION = 2
 HISTORY_LIMIT = 500
 
@@ -88,6 +98,14 @@ PUSH_KEYS = (
     "workout_id", "schedule_id", "scheduled_for",
     "pushed_at", "pushed_hash", "push_state", "error",
 )
+
+# Positive proof that an id was earned rather than inherited, written onto the
+# record at the moment it was earned. Deliberately *not* in PUSH_KEYS: it is
+# bookkeeping for the load path, not part of the push view the app reads, and
+# keeping it out means it can never be copied out of a legacy `garmin` block
+# (which `_migrate` fills key-by-key from PUSH_KEYS) and passed off as proof.
+PUSH_PROOF_KEY = "identity_proof"
+PUSH_PROOF_METHODS = ("record_push",)
 
 # Days a uid must be continuously missing from the feed before auto-prune
 # is even considered. Cleanup is otherwise explicit.
@@ -247,25 +265,119 @@ def _override_only(record):
     return out
 
 
-def _schema_version_of(data):
-    """The version a file claims. An unversioned file is treated as the
-    oldest one, because that is the assumption that validates more."""
-    try:
-        return int(data.get("schema_version"))
-    except (TypeError, ValueError):
-        return 0
+# There was a `_schema_version_of(data)` here, and the load path branched on
+# it. It is gone rather than left unused: the whole defect was that a file's
+# claimed version decided whether its ids were checked, and the build that
+# writes the current claim checks nothing. Nothing should read that number to
+# decide what to trust.
+
+
+def _identity_proof():
+    """The stamp `record_push` writes when an id is earned.
+
+    Its presence means: this id entered the map through this schema's write
+    path, which the writer only reaches after it either created the workout
+    itself or matched the ownership marker it wrote into the name. It is a
+    record of *where the id came from*, not a signature — anything that can
+    call `record_push` can mint one, exactly as anything that can call
+    `record_push` can already set an id. That is the same trust boundary,
+    written down. What it rules out is the thing that actually happened: a
+    file arriving from a build that never checked anything.
+    """
+    return {
+        "method": "record_push",
+        "schema_version": SCHEMA_VERSION,
+        "at": _now(),
+    }
+
+
+def _identity_is_proven(entry):
+    """Whether this record can show how it came by its ids.
+
+    Two forms of evidence, and neither is a version stamp:
+
+    - the `identity_proof` stamp above, written by this schema's write path;
+    - a non-empty `pushed_hash`, which is a digest of a payload this app
+      uploaded. Only a build that *created* the workout could compute one, so
+      it proves authorship on its own. It is all an older file can offer, and
+      dropping those records would orphan sessions this app genuinely owns.
+
+    A blank hash counts for nothing: a real one is a digest of what was sent,
+    so an empty string is the same absence of proof as None.
+    """
+    entry = entry or {}
+    proof = entry.get(PUSH_PROOF_KEY)
+    if isinstance(proof, dict) and proof.get("method") in PUSH_PROOF_METHODS:
+        return True
+    return bool(entry.get("pushed_hash"))
+
+
+def _orphan_message(note):
+    """What to tell the athlete about a session this app just let go of.
+
+    They are the only one who can clean it up, so the sentence carries the two
+    things they need to find it — which workout, and which day — and says
+    plainly where to go. A dropped record with no plan snapshot has neither,
+    so it falls back to the Garmin id, which is at least visible in Garmin
+    Connect.
+
+    It says "if a duplicate appears" rather than promising one, because which
+    way it goes depends on something this module cannot see: whether the copy
+    on the calendar carries the ownership marker. It usually will not (see
+    `_disown`), but the store never talks to Garmin and has no business
+    asserting what is on it. Both outcomes lead to the same instruction, so
+    the athlete loses nothing to the hedge: look at that day, and if there are
+    two, the older one is the stray.
+    """
+    title = note.get("title")
+    when = note.get("scheduled_for")
+    ident = note.get("schedule_id")
+    if ident is None:
+        ident = note.get("workout_id")
+    subject = title or "A workout this app pushed"
+    where = f" on {when}" if when else ""
+    tag = "" if title or ident is None else f" (Garmin id {ident})"
+    return (
+        f"{subject}{where}{tag} may still be on your Garmin calendar. This "
+        "app can no longer prove that copy is its own, so it will not remove "
+        "or update it. Check that day in Garmin Connect: if a duplicate "
+        "appears after the next push, the older copy is the stray and is "
+        "yours to delete."
+    )
 
 
 def _disown(push, uid, reason, notes, **extra):
-    """Drop a push record the store cannot vouch for, and say so.
+    """Drop a push record the store cannot vouch for, and say what it costs.
 
-    Dropping means the app forgets it ever pushed that uid. The next push
-    creates its own copy, marked and provably ours. That is the recoverable
-    direction: at worst the athlete sees a duplicate and deletes it, whereas
-    keeping an id we cannot vouch for means silently unscheduling a session
-    somebody else put on the calendar.
+    Dropping means the app forgets it ever pushed that uid. It does not mean
+    the copy on the Garmin calendar goes away, and for most of the records
+    this runs on it cannot be undone by pushing again either. The commonest
+    case by far is an id written before the ownership marker existed (the
+    marker arrived in 1c7aa87; everything older adopted on a title match). No
+    marker means no later push can recognise that copy as its own: the push
+    takes the create branch and puts a second row on the day. For those
+    records two sessions on the calendar is the *guaranteed* outcome of a
+    drop, not the worst case, and the stray one is permanently beyond this
+    app's reach — nothing here will ever touch it again, because nothing here
+    can prove it may. Only the athlete can remove it.
+
+    An id written by 1c7aa87 itself is dropped too — it carries no proof
+    stamp, and nothing in the file distinguishes it from a title-match
+    adoption — but that copy *is* marked, so the next push re-adopts it and
+    the drop costs only a stale "not on Garmin" in the meantime. The store
+    cannot tell the two apart without reading the Garmin calendar, which it
+    never does, so the message it writes hedges accordingly.
+
+    Dropping is still the right direction, but the trade is narrower than
+    "forgetting is free". Keeping an id we cannot vouch for risks silently
+    unscheduling a session somebody else built, which the athlete cannot undo
+    and may never notice; a visible duplicate they have been told about beats
+    an invisible deletion. The telling is what keeps that true, so every note
+    carries the title and date of the session it orphaned and a sentence
+    saying what to look for in Garmin Connect — see `_record_migration_drops`.
     """
     entry = push.pop(uid, None) or {}
+    snapshot = entry.get("plan_snapshot") or {}
     note = {
         "uid": uid,
         "reason": reason,
@@ -273,45 +385,54 @@ def _disown(push, uid, reason, notes, **extra):
         "schedule_id": entry.get("schedule_id"),
         "push_state": entry.get("push_state"),
         "scheduled_for": entry.get("scheduled_for"),
+        # The athlete's half: what to look for, and what to do about it.
+        "title": snapshot.get("title") if isinstance(snapshot, dict) else None,
         "entry": copy.deepcopy(entry),
     }
     note.update(extra)
+    note["message"] = _orphan_message(note)
     notes.append(note)
     return note
 
 
-def _validate_push_identity(push, legacy_file, notes):
+def _validate_push_identity(push, notes):
     """Refuse to inherit a Garmin id this schema cannot stand behind.
+
+    Runs on every load, against the evidence each record carries — never
+    against the file's `schema_version`. The previous version of this check
+    ran rule 1 only when the file claimed to be older, which sounded right and
+    was not: the build that first shipped the current version stamp performs
+    no validation, so a file that went v1 -> that build -> here arrived
+    claiming to have been checked and sailed past. That is the ordinary
+    upgrade order; the order the rule did work for was the one nobody takes.
 
     Two rules, in this order:
 
-    1. (Older files only.) An entry that holds an id but no `pushed_hash` was
-       never sent by any process that could see what it was sending — that is
-       exactly the shape the previous schema's adopt-on-a-title-match left
-       behind, and the workout underneath it may be one the athlete built by
-       hand. It is dropped. The order matters: running this first means an
-       unproven claim on a proven record's ids costs only the unproven one.
+    1. An entry that holds an id it cannot account for is dropped — see
+       `_identity_is_proven` for what counts. That is exactly the shape the
+       old adopt-on-a-title-match left behind, and the workout underneath it
+       may be one the athlete built by hand. The order matters: running this
+       first means an unproven claim on a proven record's ids costs only the
+       unproven one.
 
-       Under this schema `pushed_hash is None` is a legitimate state — the
-       writer sets it after adopting a workout it proved is ours by the
-       marker, so that the next push rewrites content it could not read
-       rather than trusting it. Those records are kept.
+       `pushed_hash is None` is a legitimate state under this schema — the
+       writer leaves it unset after adopting a workout it proved is ours by
+       the marker, so the next push rewrites content it could not read rather
+       than trusting it. Those records carry the `identity_proof` stamp
+       instead, which is why the check cannot simply be "is there a hash".
 
-    2. (Every file.) No id may be owned twice. A schedule id is one row on
-       the athlete's calendar; two uids claiming it means unscheduling either
-       silently removes the other. `record_push` has refused this since the
-       ids were split out, but nothing enforced it on the way in, so a file
-       written by an older schema could carry the state straight past the
-       tripwire. Every uid in a colliding set is disowned: which of them (if
-       either) really owns the row is not knowable from here, and guessing
-       wrong is the destructive outcome.
+    2. No id may be owned twice. A schedule id is one row on the athlete's
+       calendar; two uids claiming it means unscheduling either silently
+       removes the other. `record_push` has refused this since the ids were
+       split out, but nothing enforced it on the way in, so a file written by
+       another build could carry the state straight past the tripwire. Every
+       uid in a colliding set is disowned: which of them (if either) really
+       owns the row is not knowable from here, and guessing wrong is the
+       destructive outcome.
     """
-    if legacy_file:
-        for uid, entry in list(push.items()):
-            # Any empty hash, not just None: a real one is a digest of the
-            # payload that was sent, so a blank is the same absence of proof.
-            if _holds_a_copy(entry) and not entry.get("pushed_hash"):
-                _disown(push, uid, "unproven_inherited_id", notes)
+    for uid, entry in list(push.items()):
+        if _holds_a_copy(entry) and not _identity_is_proven(entry):
+            _disown(push, uid, "unproven_inherited_id", notes)
 
     claims = {}
     for uid, entry in push.items():
@@ -335,7 +456,7 @@ def _validate_push_identity(push, legacy_file, notes):
     return notes
 
 
-def _migrate(data, notes=None, legacy_file=None):
+def _migrate(data, notes=None):
     """Carry an older state file forward: lift `garmin` out of every override,
     then validate the push identity it brought with it.
 
@@ -346,15 +467,19 @@ def _migrate(data, notes=None, legacy_file=None):
 
     Nothing the app can still stand behind is dropped, and history is left
     exactly as written — it is an audit log, not state. What *is* dropped is
-    push identity that fails `_validate_push_identity`: ids from a schema
-    that adopted workouts on a title match, and ids two uids both claim.
-    Every such drop is appended to `notes` so the caller can surface it;
-    a migration that drops nothing leaves `notes` empty, which is the case
-    for every legitimate record and for the shipped state file.
+    push identity that fails `_validate_push_identity`: ids no record can
+    account for, and ids two uids both claim. That check runs over the whole
+    map on every load, not only when the file looks old, because "the file
+    looks old" is a claim made by the build that wrote it. Every drop is
+    appended to `notes` so the caller can surface it; a migration that drops
+    nothing leaves `notes` empty, which is the case for every legitimate
+    record and for the shipped state file.
+
+    Legacy ids are copied forward key-by-key from PUSH_KEYS, so a `garmin`
+    block cannot smuggle an `identity_proof` in with them — an old id is
+    judged on the hash it really has.
     """
     notes = [] if notes is None else notes
-    if legacy_file is None:
-        legacy_file = _schema_version_of(data) < SCHEMA_VERSION
     overrides = data.get("workout_overrides")
     if not isinstance(overrides, dict):
         overrides = {}
@@ -392,7 +517,7 @@ def _migrate(data, notes=None, legacy_file=None):
             continue
         entry.setdefault("uid", uid)
 
-    _validate_push_identity(push, legacy_file, notes)
+    _validate_push_identity(push, notes)
 
     data["workout_overrides"] = overrides
     data["garmin_push"] = push
@@ -418,8 +543,9 @@ class PlanStore:
         self._lock = threading.RLock()
         self._state = _empty_state()
         self.load_error = None
-        # Push records the last load refused to inherit. Empty for every file
-        # this schema wrote; see `_validate_push_identity`.
+        # Push records the last load refused to inherit. Empty for every
+        # record that can show where its ids came from, whatever version the
+        # file it arrived in claims to be; see `_validate_push_identity`.
         self.migration_notes = []
         if autoload:
             self.load()
@@ -455,12 +581,12 @@ class PlanStore:
             for key in ("proposals", "rejected_signatures", "history"):
                 if not isinstance(base.get(key), list):
                     base[key] = []
-            # Migrate on the file's own shape, before stamping the version:
-            # what the *file* claims decides which identity rules apply, and
-            # a file with no version at all is treated as the oldest one.
+            # Migrate on the file's own shape. What the file *claims* decides
+            # nothing: the version is stamped afterwards and the identity
+            # rules never read it, because the build that wrote the stamp is
+            # the one being checked up on.
             notes = []
-            _migrate(base, notes,
-                     legacy_file=_schema_version_of(data) < SCHEMA_VERSION)
+            _migrate(base, notes)
             base["schema_version"] = SCHEMA_VERSION
             self._state = base
             self.migration_notes = notes
@@ -470,10 +596,19 @@ class PlanStore:
     def _record_migration_drops(self, notes):
         """Make a dropped push identity visible rather than silent.
 
-        Three ways, because the athlete may notice any one of them: a log
-        line for whoever is watching the process, `migration_notes` /
-        `stats()` for the status endpoint, and a history entry so the audit
-        log the UI already renders says what happened to that workout.
+        Silence is the failure mode to avoid here. A drop leaves a copy on the
+        athlete's Garmin calendar that this app will not touch again, and
+        usually cannot reach again at all (`_disown` has the cases). Where it
+        cannot, the next push stacks a duplicate beside it and the athlete is
+        the only one who can remove either — so they have to be told which
+        session, and on which day.
+
+        Three ways, because they may notice any one of them: a log line for
+        whoever is watching the process, `migration_notes` / `stats()` for the
+        status endpoint (which `/api/status` forwards to the UI), and a
+        history entry so the audit log the UI already renders says what
+        happened to that workout. Each note carries `title`, `scheduled_for`
+        and a ready-to-show `message`.
 
         The history entry is written here rather than saved immediately —
         `load` does not write to disk — so it persists with the next save,
@@ -482,13 +617,12 @@ class PlanStore:
         for note in notes:
             _LOG.warning(
                 "plan_store: not inheriting the Garmin identity for %s "
-                "(reason=%s workout_id=%s schedule_id=%s%s). This app cannot "
-                "prove it wrote that workout, so it will leave it alone; a "
-                "later push creates its own copy.",
+                "(reason=%s workout_id=%s schedule_id=%s%s). %s",
                 note.get("uid"), note.get("reason"), note.get("workout_id"),
                 note.get("schedule_id"),
                 (" conflict_with=%s" % (note.get("conflict_with"),))
                 if note.get("conflict_with") else "",
+                note.get("message"),
             )
             self._append_history("migration_drop_push", note.get("uid"),
                                  "migration", note.get("entry"), None,
@@ -583,8 +717,10 @@ class PlanStore:
                 ),
                 "writable": self.writable,
                 "load_error": self.load_error,
-                # Push identity the last load refused to inherit. Zero for
-                # any file this schema wrote.
+                # Push identity the last load refused to inherit. Zero once
+                # every record carries its own proof; each note names the
+                # session it orphaned so the UI can tell the athlete what to
+                # remove in Garmin Connect.
                 "migration_dropped": len(self.migration_notes),
                 "migration_notes": copy.deepcopy(self.migration_notes),
             }
@@ -1127,6 +1263,17 @@ class PlanStore:
             if plan_snapshot is not None:
                 entry["plan_snapshot"] = copy.deepcopy(plan_snapshot)
             entry["updated_at"] = _now()
+
+            # This is where an id is earned, so this is where it is stamped.
+            # The stamp is what lets a marker-proven adoption — which has no
+            # hash by design — survive a load that trusts nothing else, and
+            # it is what an inherited id cannot have. It goes when the ids go:
+            # a proof for a copy that is no longer there proves nothing, and
+            # leaving it behind would let an id set later ride on it.
+            if _holds_a_copy(entry):
+                entry[PUSH_PROOF_KEY] = _identity_proof()
+            else:
+                entry.pop(PUSH_PROOF_KEY, None)
 
             # Validate before writing, so a refused push leaves no residue.
             self._check_id_ownership_locked(uid, entry.get("workout_id"),

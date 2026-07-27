@@ -191,6 +191,31 @@ def daterange(start, end):
         day += timedelta(days=1)
 
 
+def _month_pairs(start, end):
+    """`(year, month)` for every month an ISO date range touches.
+
+    Garmin's calendar endpoint is month-keyed, so a week that straddles a
+    month boundary is two reads — and, when one of them fails, one answered
+    month and one unanswered one.
+    """
+    start_d, end_d = _date.fromisoformat(start), _date.fromisoformat(end)
+    months = []
+    cursor = start_d.replace(day=1)
+    while cursor <= end_d:
+        months.append((cursor.year, cursor.month))
+        cursor = (cursor.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return months
+
+
+def _months_between(start, end):
+    """The same months as `_month_pairs`, as "YYYY-MM" strings.
+
+    Used to say "none of these months could be read", which is what an absent
+    Garmin session means: not one empty calendar, but no calendar at all.
+    """
+    return ["%04d-%02d" % pair for pair in _month_pairs(start, end)]
+
+
 _TZ_LOCK = threading.Lock()
 _TZ_CACHE = {}
 
@@ -409,7 +434,47 @@ class TrainingService:
         self._jobs = {}
         self._job_order = []
         self._active_job = None
+        # The last removal attempt that was refused, per uid. See
+        # `note_removal_failure`.
+        self._removal_failures = {}
         self._load_push_log()
+
+    # -- refused removals -------------------------------------------------
+    #
+    # The writer refuses a removal it cannot prove is safe, and records the
+    # refusal against the push record as `push_state: "failed"` with the
+    # message on `error`. That is the right thing for the store to hold, and
+    # it is not enough for the UI: a refused *push* leaves exactly the same
+    # two fields, so a card reading only the record says "push failed" about a
+    # removal and offers Retry, which would send the session again.
+    #
+    # This is the missing bit — which act was refused, and whether trying
+    # again is the remedy. Process-local on purpose: it describes an attempt,
+    # not the calendar, and the moment the app restarts the only honest thing
+    # left to say is what the record itself carries, which is the writer's own
+    # sentence verbatim. Nothing here is ever an input to a write.
+
+    def note_removal_failure(self, uid, message, retryable=True):
+        with self._lock:
+            self._removal_failures[uid] = {
+                "state": "failed",
+                "action": "unschedule",
+                "message": redact(message),
+                "retryable": bool(retryable),
+                "at": _utc_now(),
+            }
+
+    def clear_removal_failure(self, uid):
+        """Forget a refusal. Called when the removal finally lands, and when
+        a push writes a fresh copy — in both cases the warning describes a
+        state the athlete is no longer in."""
+        with self._lock:
+            self._removal_failures.pop(uid, None)
+
+    def removal_notice(self, uid):
+        with self._lock:
+            notice = self._removal_failures.get(uid)
+            return copy.deepcopy(notice) if notice else None
 
     # -- store ------------------------------------------------------------
 
@@ -467,10 +532,16 @@ class TrainingService:
             # be looking at a copy nothing here will touch again. Zero for any
             # file this schema wrote, so a non-zero count is worth showing.
             "migration_dropped": stats.get("migration_dropped", 0),
+            # `title`, `scheduled_for` and `message` are the athlete's half of
+            # the note and the reason this is forwarded at all: which session,
+            # on which day, and what to do about it. The ids and the reason
+            # code are for whoever is reading a bug report. Forwarding the
+            # second set without the first left the UI with nothing it could
+            # put in front of a cyclist.
             "migration_notes": [
                 {k: note.get(k) for k in
-                 ("uid", "reason", "workout_id", "schedule_id",
-                  "scheduled_for", "conflict_with")}
+                 ("uid", "reason", "title", "message", "workout_id",
+                  "schedule_id", "scheduled_for", "conflict_with")}
                 for note in (stats.get("migration_notes") or [])
             ],
         }
@@ -779,11 +850,23 @@ class TrainingService:
                 and cache.get("start") <= start and cache.get("end") >= end):
             return cache
 
+        # `scheduled_blocked` is a list of "YYYY-MM" the calendar could not be
+        # read for. It travels beside `scheduled` because an empty list of
+        # sessions means two different things and the panel renders both: read
+        # and nothing there, or no answer at all. A day the app has never
+        # managed to look at must not be drawn as a clear day.
         empty = {"start": start, "end": end, "readiness": {}, "activities": {},
-                 "scheduled": {}, "training_status": None, "fetched_at": None}
+                 "scheduled": {}, "scheduled_blocked": [],
+                 "training_status": None, "fetched_at": None}
 
         client = self.garmin()
         if client is None:
+            # No account, or no session. Nothing was read — but the source
+            # banner ("Garmin isn't connected" / "Can't reach Garmin") already
+            # says exactly that, once, and repeating it as a warning on every
+            # day in view would be a second and scarier version of it.
+            # `scheduled_blocked` is for the narrower fact: a connected
+            # account whose calendar would not answer.
             return empty
 
         context = copy.deepcopy(empty)
@@ -813,9 +896,13 @@ class TrainingService:
                 f"Garmin activities unavailable ({type(exc).__name__}).")
 
         try:
-            context["scheduled"] = self._scheduled_by_date(start, end)
+            context["scheduled"], context["scheduled_blocked"] = \
+                self._scheduled_by_date(start, end)
         except Exception:
-            pass
+            # Not even the fan-out could run. Nothing was read, so nothing is
+            # claimed: every month in range stays unanswered.
+            context["scheduled"] = {}
+            context["scheduled_blocked"] = _months_between(start, end)
 
         context["fetched_at"] = _utc_now()
         with self._lock:
@@ -834,72 +921,113 @@ class TrainingService:
         return _extract_readiness(getter(date_str))
 
     def _scheduled_by_date(self, start, end):
-        """`get_scheduled_workouts(year, month)` is month-keyed, so a range
-        query fans out over every month it spans."""
+        """`(by_date, blocked_months)` for the Garmin calendar over a range.
+
+        `get_scheduled_workouts(year, month)` is month-keyed, so this fans out
+        over every month the range spans. Each month is read through
+        `GarminWorkoutWriter.read_scheduled_rows`, which is the one reader in
+        this codebase that knows what Garmin's responses look like.
+
+        There used to be a second one, inline here, and the two disagreed.
+        Garmin returns the calendar either as flat rows carrying their own
+        date or as one node per day with the sessions hanging beneath it; this
+        copy handled only the first, so on any account answering in the second
+        shape the panel came back empty — the inner rows have no date, the
+        dated parent has no ids, and everything was skipped. The panel is what
+        the athlete reads to see what is actually on their calendar, so it was
+        answering "nothing" about days holding sessions. The reader lives in
+        one place now; a shape the writer learns, this learns with it.
+
+        `blocked_months` is the months that could not be read at all, kept
+        apart from months that were read and hold nothing. Two facts, two
+        values, all the way up to the UI.
+        """
         try:
             writer = self.writer()
         except ApiError:
-            return {}
-        module, _ = load_module("garmin_workout_writer")
-        if module is None:
-            return {}
+            return {}, _months_between(start, end)
 
-        owned = set()
-        store = self.store_or_none()
-        if store is not None:
-            try:
-                for record in (store.all_overrides() or {}).values():
-                    workout_id = (record.get("garmin") or {}).get("workout_id")
-                    if workout_id:
-                        owned.add(str(workout_id))
-            except Exception:
-                pass
+        owned_workouts, owned_schedules = self._owned_garmin_ids()
+
+        module, _ = load_module("garmin_workout_writer")
+        session_level = tuple(
+            getattr(module, name) for name in
+            ("GarminNotConfigured", "GarminAuthFailed")
+            if module is not None and getattr(module, name, None)) or ()
 
         out = {}
-        start_d, end_d = _date.fromisoformat(start), _date.fromisoformat(end)
-        seen_months = set()
-        cursor = start_d.replace(day=1)
-        while cursor <= end_d:
-            seen_months.add((cursor.year, cursor.month))
-            cursor = (cursor.replace(day=28) + timedelta(days=4)).replace(day=1)
-
-        for year, month in sorted(seen_months):
+        blocked = []
+        for year, month in _month_pairs(start, end):
             try:
-                response = writer.scheduled_in_month(year, month)
+                rows, status = writer.read_scheduled_rows(year, month)
+            except session_level:
+                # Credentials gone, login expired: not a fact about this month,
+                # will not clear on a retry, and the source banner says it once
+                # already. Reporting it per day would put the same reconnect
+                # notice on seven days running.
+                return out, []
             except Exception:
+                rows, status = [], "blocked"
+            if status != "read":
+                blocked.append("%04d-%02d" % (year, month))
                 continue
-            for entry in module._iter_dicts(response):
-                entry_date = module._extract_date(entry)
-                if not entry_date or not (start <= entry_date <= end):
+            for row in rows:
+                if not (start <= row["date"] <= end):
                     continue
-                workout_id = None
-                for key in module._WORKOUT_ID_KEYS:
-                    workout_id = module._coerce_id(entry.get(key))
-                    if workout_id:
-                        break
-                schedule_id = None
-                for key in module._SCHEDULE_ID_KEYS:
-                    schedule_id = module._coerce_id(entry.get(key))
-                    if schedule_id:
-                        break
-                if not (workout_id or schedule_id):
-                    continue
-                out.setdefault(entry_date, []).append({
-                    "schedule_id": schedule_id,
-                    "workout_id": workout_id,
+                out.setdefault(row["date"], []).append({
+                    "schedule_id": row["schedule_id"],
+                    "workout_id": row["workout_id"],
                     # Marker stripped. Every workout this app writes carries
                     # `[ts:xxxxxxxx]` in its Garmin name so a later push can
                     # prove the copy is its own; that is bookkeeping, and this
                     # value goes straight onto the athlete's calendar. The
                     # writer owns the stripping, so ownership and display
-                    # can't drift apart — and note ownership below is proved
-                    # against the store, never against the stripped name.
-                    "title": module.display_title(entry),
+                    # can't drift apart.
+                    "title": row["title"],
                     # Only ids in our own store are ours to unschedule; a
                     # workout the user built in Garmin Connect is read-only.
-                    "owned_by_us": str(workout_id) in owned,
+                    # The name's marker is the writer's proof and is not
+                    # re-derived here — `marked` says the copy is *some* uid's
+                    # of ours, the store says which.
+                    "owned_by_us": bool(
+                        (row["workout_id"] and
+                         row["workout_id"] in owned_workouts)
+                        or (row["schedule_id"] and
+                            row["schedule_id"] in owned_schedules)),
                 })
-        return out
+        return out, blocked
+
+    def _owned_garmin_ids(self):
+        """`(workout_ids, schedule_ids)` this app's push records hold.
+
+        Read off the store's push map, which is the only place an id this app
+        wrote is recorded. Both ids, because a copy that came back without a
+        workout id is still ours and still addressable by its schedule id.
+        """
+        workouts, schedules = set(), set()
+        store = self.store_or_none()
+        if store is None:
+            return workouts, schedules
+        try:
+            # Every uid the store is holding a Garmin copy for projects here,
+            # including one that has no override of its own — that projection
+            # is exactly the "push-only" record, and its copy is as much ours
+            # as any other.
+            records = [push_record(store, uid, record) for uid, record
+                       in (store.all_overrides() or {}).items()]
+        except Exception:
+            return workouts, schedules
+        for record in records:
+            for key, sink in (("workout_id", workouts),
+                              ("schedule_id", schedules)):
+                value = (record or {}).get(key)
+                if isinstance(value, bool) or value is None:
+                    continue
+                try:
+                    sink.add(int(value))
+                except (TypeError, ValueError):
+                    continue
+        return workouts, schedules
 
     # -- sources / capabilities ------------------------------------------
 
@@ -1096,6 +1224,27 @@ def push_record(store, uid, record=None):
     return dict((record or {}).get("garmin") or {})
 
 
+def _garmin_day_block(context, day, readiness=None, activities=None):
+    """The `garmin` block for one day of the calendar payload.
+
+    `scheduled_readable` is the honest half of `scheduled`. An empty list of
+    sessions is two different facts — the calendar was read and holds nothing,
+    or the calendar could not be read — and the UI draws them differently: the
+    first is a clear day, the second is "this app doesn't know what's on your
+    calendar". Collapsing them is how a panel whose whole job is showing the
+    athlete reality came to show a blank day for a day holding sessions.
+    """
+    blocked = set((context or {}).get("scheduled_blocked") or [])
+    return {
+        "readiness": ((context or {}).get("readiness") or {}).get(day)
+        if readiness is None else readiness,
+        "activities": ((context or {}).get("activities") or {}).get(day, [])
+        if activities is None else activities,
+        "scheduled": ((context or {}).get("scheduled") or {}).get(day, []),
+        "scheduled_readable": day[:7] not in blocked,
+    }
+
+
 def _on_garmin(garmin):
     """True when this app has a copy of the session on the athlete's Garmin
     calendar — the condition that makes "Remove from Garmin" meaningful, and
@@ -1120,7 +1269,7 @@ def _push_state_for(garmin, effective_date):
 
 
 def build_effective_workout(entry, record, availability, today,
-                            orphaned=False, garmin=None):
+                            orphaned=False, garmin=None, removal=None):
     """Rule 1: overrides are a sparse per-field patch, not a record swap. If
     the user moved a workout and the coach later rewrote its description, the
     user keeps their date *and* gets the new text."""
@@ -1203,6 +1352,10 @@ def build_effective_workout(entry, record, availability, today,
             # "drifted" session is still sitting on the Edge, and a "never"
             # one never was. This is what the UI offers removal on.
             "on_garmin": _on_garmin(garmin),
+            # The last removal this app refused to make, or None. Distinct
+            # from `error` above, which cannot say which act was refused —
+            # see `TrainingService.note_removal_failure`.
+            "removal": removal,
         },
         "override": override_block,
         "rev": int((record or {}).get("rev") or 0),
@@ -1278,6 +1431,16 @@ class EffectiveCalendar:
                                             self.overrides.get(uid))
         return self._pushes[uid]
 
+    def removal_for(self, uid):
+        """The last refused removal for `uid`, or None.
+
+        Deliberately not folded into `push_for`: the push record is what the
+        store holds and what write decisions are made from, and nothing about
+        an attempt that changed nothing belongs in it.
+        """
+        service = getattr(self, "service", None)
+        return service.removal_notice(uid) if service is not None else None
+
     def workout(self, uid):
         entry = self.by_uid.get(uid)
         record = self.overrides.get(uid)
@@ -1303,9 +1466,11 @@ class EffectiveCalendar:
             }
             return build_effective_workout(entry, record, self.availability,
                                            self.today, orphaned=True,
-                                           garmin=self.push_for(uid))
+                                           garmin=self.push_for(uid),
+                                           removal=self.removal_for(uid))
         return build_effective_workout(entry, record, self.availability,
-                                       self.today, garmin=self.push_for(uid))
+                                       self.today, garmin=self.push_for(uid),
+                                       removal=self.removal_for(uid))
 
     def all_workouts(self):
         uids = list(self.by_uid.keys())
@@ -2367,6 +2532,11 @@ def run_push_job(service, job_id):
                 dry_run=False,
                 plan_snapshot=calendar.snapshot_for(workout["uid"]))
             row = result.to_dict()
+            if result.ok:
+                # A copy has just been written for this uid, so a warning
+                # about a removal that was refused earlier describes a state
+                # the athlete is no longer in.
+                service.clear_removal_failure(workout["uid"])
             job["items"][index] = dict(
                 row,
                 on_garmin=_on_garmin({
@@ -2455,6 +2625,10 @@ def run_unpush(service, uid):
             exc, getattr(module, "GarminNotConfigured", ()))
         auth = module is not None and isinstance(
             exc, getattr(module, "GarminAuthFailed", ()))
+        if not (not_configured or auth):
+            # Session-level failures are covered by the reconnect banner and
+            # are not facts about this session; anything else is.
+            service.note_removal_failure(uid, str(exc))
         raise ApiError(
             "not_configured" if not_configured else "garmin_rejected",
             redact(str(exc)), status=503 if (not_configured or auth) else 502)
@@ -2463,11 +2637,58 @@ def run_unpush(service, uid):
         # The writer has already recorded the failure against the push record,
         # which must survive: the copy is still on the calendar, and saying
         # otherwise would lose the only handle left on it.
+        retryable = _removal_is_retryable(service, uid, result.date)
+        service.note_removal_failure(uid, result.reason or result.error,
+                                     retryable=retryable)
         raise ApiError(
             "garmin_rejected",
-            redact(result.error) or "Garmin refused to remove that session.",
-            status=502, detail={"uid": uid})
+            redact(result.reason or result.error)
+            or "Garmin refused to remove that session.",
+            status=502,
+            detail={
+                "uid": uid,
+                # Both are for the UI, and both are the difference between an
+                # athlete who knows what to do and one staring at a red box:
+                # the copy is still on their calendar, and whether pressing
+                # the button again is the remedy or whether they have to go
+                # and tidy it up in Garmin Connect themselves.
+                "still_on_garmin": _on_garmin(push_record(service.store_or_none(),
+                                                          uid)),
+                "retryable": retryable,
+            })
+    service.clear_removal_failure(uid)
     return result.to_dict()
+
+
+def _removal_is_retryable(service, uid, date):
+    """Is pressing Remove again the remedy for this refusal?
+
+    Asked of the calendar rather than of the refusal's wording. The writer
+    turns a removal away for two quite different reasons, and the athlete's
+    next move is different for each: it could not read the calendar (transient
+    — try again), or it read the calendar and could not prove the row is ours
+    (permanent here — the only way that copy goes is by their own hand in
+    Garmin Connect). Matching on message text would make this app's UI a
+    consumer of the writer's prose; asking what state the calendar is in
+    cannot drift.
+
+    `refresh=False` on purpose: this reuses the month the refusal itself just
+    read, so classifying a refusal costs no extra Garmin call, and this
+    answer decides a *sentence*, never a write.
+
+    Unknown answers all come back True — the failure that keeps the affordance
+    and invites a retry is the recoverable one.
+    """
+    if not date:
+        return True
+    try:
+        _workout_id, _schedule_id, status = service.writer().find_owned_scheduled(
+            uid, date, refresh=False)
+    except Exception:
+        return True
+    # "absent" is the only answer a retry cannot change: the calendar was
+    # read, and nothing on it is provably ours.
+    return status != "absent"
 
 
 # ---------------------------------------------------------------------------
@@ -2688,11 +2909,8 @@ def create_app(demo=None):
                 # Sessions the engine could not place. Not approvable, but
                 # never silent: an unsolvable week has to be visible.
                 "unresolved": unresolved_by_day.get(key, []),
-                "garmin": {
-                    "readiness": (context.get("readiness") or {}).get(key),
-                    "activities": activities,
-                    "scheduled": (context.get("scheduled") or {}).get(key, []),
-                },
+                "garmin": _garmin_day_block(context, key,
+                                           activities=activities),
                 "load": {
                     "planned_tss": round(planned_tss, 1) if planned_tss else None,
                     "actual_tss": round(actual, 1) if actual else None,
@@ -2738,11 +2956,7 @@ def create_app(demo=None):
             "workouts": workouts,
             "proposals": proposals,
             "unresolved": unresolved,
-            "garmin": {
-                "readiness": (context.get("readiness") or {}).get(day),
-                "activities": (context.get("activities") or {}).get(day, []),
-                "scheduled": (context.get("scheduled") or {}).get(day, []),
-            },
+            "garmin": _garmin_day_block(context, day),
             "load": {"planned_tss": round(planned_tss, 1) if planned_tss else None,
                      "actual_tss": None},
         }

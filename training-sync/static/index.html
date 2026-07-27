@@ -230,6 +230,28 @@ h1,h2,h3,h4,p{margin:0}
   border:1px dashed var(--rule);border-radius:10px;
 }
 
+/* ------------------------------------- what Garmin says is on that day */
+/* Deliberately quiet and outside the drop zone: this is the account's own
+   answer, not part of his plan, and none of it can be dragged. The
+   `unread` variant is the one that matters — an unanswered calendar has to
+   look different from a clear one. */
+.gstrip{
+  margin-top:8px;padding:7px 9px;border-radius:9px;font-size:11.5px;
+  background:var(--surface-2);color:var(--ink-2);border:1px solid var(--border);
+}
+.gstrip-h{display:flex;align-items:center;gap:5px;font-weight:600;color:var(--ink-2)}
+.gstrip-h svg{width:13px;height:13px;flex:none}
+.gstrip-r{display:flex;align-items:baseline;gap:6px;margin-top:4px;line-height:1.3}
+.gstrip-r .gt{color:var(--ink);overflow-wrap:anywhere}
+.gstrip-r .gn{margin-left:auto;flex:none;font-size:10.5px;color:var(--ink-muted)}
+.gstrip-r.theirs .gt{font-style:italic}
+.gstrip.unread{
+  border-color:var(--status-warning);
+  background:color-mix(in srgb,var(--status-warning) 12%,transparent);
+  color:var(--ink);
+}
+.gstrip.unread .gstrip-h svg{color:var(--status-warning)}
+
 /* -------------------------------------------------------------- workout card */
 .card{
   display:flex;flex-direction:column;background:var(--surface);
@@ -286,6 +308,9 @@ h1,h2,h3,h4,p{margin:0}
 .card-push{
   display:flex;align-items:center;gap:6px;padding:6px 11px;font-size:11.5px;font-weight:560;
   border-top:1px solid var(--border);background:var(--surface-2);color:var(--ink-2);
+  /* A refusal is a sentence, not a chip: it names the day, says what could
+     not be proved and what to do instead. Let it wrap rather than clip it. */
+  flex-wrap:wrap;line-height:1.35;overflow-wrap:anywhere;
 }
 .card-push.good{background:color-mix(in srgb,var(--status-good) 12%,transparent);color:var(--ink)}
 .card-push.warn{background:color-mix(in srgb,var(--status-warning) 20%,transparent);color:var(--ink)}
@@ -740,6 +765,22 @@ td.wrap{white-space:normal;min-width:190px}
    there (garmin.on_garmin), and only ever when the athlete asks. Skipping or
    dropping a session never removes anything by itself — it says the copy is
    still on the calendar and offers the way off.
+
+   Three fields carry a refusal, and none of them may be swallowed. The writer
+   now stops rather than act on a calendar it could not read, and a refusal
+   that reaches nobody is indistinguishable from a success:
+
+     workouts[].garmin.removal      the last removal this app REFUSED to make
+                                    ({state,action,message,retryable}) — the
+                                    only thing that tells a refused removal
+                                    apart from a refused push, which leaves
+                                    the identical push_state on the record.
+     days[].garmin.scheduled_readable
+                                    false = the calendar could not be read, so
+                                    an empty `scheduled` is no evidence at all.
+     status.store.migration_notes   push identity the store would not inherit:
+                                    a copy left on Garmin that nothing here can
+                                    remove, and only the athlete can.
    ========================================================================= */
 
 const $ = (s, r) => (r || document).querySelector(s);
@@ -1040,6 +1081,16 @@ const writesBlockedReason = () =>
   (canPush() && !canWrite()) ? (caps().garmin_writes_disabled_reason
     || "Writing to Garmin is switched off on this machine.") : null;
 
+/* Re-read both sources and redraw. Named because more than one thing asks
+   for it now: the feed pill, and a day whose Garmin calendar came back
+   unreadable — where "try again" is the actual remedy. */
+async function refreshSources() {
+  S.fetching = true; render();
+  try { await api("/api/refresh", { method: "POST", body: { sources: ["trainingpeaks_ics", "garmin"] } }); }
+  catch (e) { /* the source state itself will report the failure */ }
+  await loadAll(true);
+}
+
 function toast(msg, kind, action) {
   S.toast = { msg, kind, action, id: Date.now() };
   render();
@@ -1204,6 +1255,33 @@ function renderBanners() {
     banner("warn", "g-warn", null, escapeHtml(w.message || ""));
   });
 
+  /* A month this app could not read. Said once, above the grid, because the
+     failure covers every day on screen — and because the days below now look
+     empty for a reason that has nothing to do with the athlete's calendar. */
+  calendarNotices(S.cal).forEach(n => {
+    const again = el("button", "btn sm", "Try again");
+    again.onclick = () => refreshSources();
+    banner(n.kind, "g-warn", n.title,
+      escapeHtml(n.body) + (n.days.length > 1
+        ? "<br>" + n.days.map(escapeHtml).join(" · ") : ""),
+      [again]);
+  });
+
+  /* Push identity the store refused to inherit. It costs him a stray session
+     on his Garmin calendar that nothing here can reach — so it is said here,
+     with the day and the title, and not left in /api/status for nobody. */
+  storeNotices(S.status).forEach(n => {
+    // Each stray copy names itself and carries the store's own sentence about
+    // it on hover — one per item, because there can be more than one and they
+    // are on different days.
+    const items = n.items.map(i =>
+      "<b" + (i.detail ? ' title="' + escapeHtml(i.detail) + '"' : "") + ">"
+      + escapeHtml(i.title) + "</b>"
+      + (i.date ? " — " + escapeHtml(i.date) : "")).join("<br>");
+    banner(n.kind, "g-warn", n.title,
+      escapeHtml(n.body) + (items ? "<br>" + items : ""));
+  });
+
   const orphans = (S.cal && S.cal.orphans) || [];
   if (orphans.length) {
     banner("warn", "g-info", orphans.length + " workout" + (orphans.length > 1 ? "s" : "") + " removed in TrainingPeaks",
@@ -1347,7 +1425,38 @@ function dayColumn(date, isToday) {
     zone.appendChild(el("div", "emptyday", unavailable ? "Blocked out" : "Rest"));
   }
   col.appendChild(zone);
+
+  /* What Garmin actually says is on that day — outside the drop zone, because
+     it is not part of his plan and nothing here can be dragged. */
+  const gp = garminPanel(day);
+  if (gp) col.appendChild(garminStrip(gp, date));
   return col;
+}
+
+/* The Garmin-calendar strip under a day.
+   Two states, and the difference between them is the whole reason it exists:
+   the calendar was read (these are the sessions on it, ours and his), or it
+   could not be read (this app does not know, which is NOT a clear day). */
+function garminStrip(panel, date) {
+  const box = el("div", "gstrip" + (panel.state === "unreadable" ? " unread" : ""));
+  const head = el("div", "gstrip-h");
+  head.appendChild(svg(panel.state === "unreadable" ? "g-warn" : "g-up", "glyph"));
+  head.appendChild(document.createTextNode(panel.text));
+  box.appendChild(head);
+
+  if (panel.state === "unreadable") {
+    box.title = "This app doesn't know what's on your Garmin account for "
+      + date + ". That is not the same as the day being clear.";
+    return box;
+  }
+
+  panel.rows.forEach(row => {
+    const line = el("div", "gstrip-r" + (row.ours ? "" : " theirs"));
+    line.appendChild(el("span", "gt", row.title));
+    line.appendChild(el("span", "gn", row.note));
+    box.appendChild(line);
+  });
+  return box;
 }
 
 /* ------------------------------------------------------------ workout card */
@@ -1456,7 +1565,7 @@ function workoutCard(w, day) {
     card.appendChild(strip);
   }
 
-  const push = pushInfo(w);
+  const push = pushInfo(w, S.pushJob);
   if (push) {
     const ps = el("div", "card-push " + push.cls);
     ps.appendChild(document.createTextNode(push.text));
@@ -1466,13 +1575,27 @@ function workoutCard(w, day) {
       r.onclick = ev => { ev.stopPropagation(); openPushDrawer([w.uid]); };
       ps.appendChild(r);
     }
-    // A session he has taken off his week while a copy is still on the Edge
-    // is the one case where the way out belongs on the card, not two clicks
-    // into a menu — the badge states a problem, so it carries the fix.
+    // A session he has taken off his week while a copy is still on the Edge —
+    // or one this app refused to remove — is where the way out belongs on the
+    // card, not two clicks into a menu: the badge states a problem, so it
+    // carries the fix. A refused removal MUST keep this. Losing it is how a
+    // copy ended up on the Edge with nothing on screen pointing at it.
     if (push.remove) {
-      const r = el("button", "rt", "Remove");
+      const blocked = removeBlockedReason();
+      const r = el("button", "rt", push.removeLabel || "Remove");
       r.style.textDecoration = "underline";
-      r.onclick = ev => { ev.stopPropagation(); removeFromGarmin(w); };
+      if (blocked) {
+        r.disabled = true;
+        r.setAttribute("aria-disabled", "true");
+        r.title = blocked;
+      } else {
+        r.title = push.retryable === false
+          ? "Try it again anyway — if you've already deleted it in Garmin "
+            + "Connect, this is what lets the app catch up."
+          : "Unschedules this app's copy. The workout stays in your Garmin "
+            + "library.";
+        r.onclick = ev => { ev.stopPropagation(); removeFromGarmin(w); };
+      }
       ps.appendChild(r);
     }
     card.appendChild(ps);
@@ -1482,18 +1605,56 @@ function workoutCard(w, day) {
   return card;
 }
 
+/* ═════════════════════════════════════════════════════════ ui-logic ══════ */
+/* What the page SAYS, decided apart from how it draws it.
+   Every function below is pure — arguments in, a plain object out, no DOM,
+   no `S`, no fetch. The block between the two markers is lifted verbatim by
+   test_web_app.py and exercised under node, so these are the sentences the
+   athlete reads with a real regression test behind them. Keep it that way:
+   anything reaching for `document` or `S` belongs outside the markers. */
+/* --8<-- ui-logic-start --8<-- */
+
 /* Push outcome is its OWN region (bottom strip) with its own palette, never
-   the border — the border belongs to provenance. */
-function pushInfo(w) {
-  const live = S.pushJob && (S.pushJob.items || []).find(i => i.uid === w.uid);
-  if (live && S.pushJob.state === "running") {
+   the border — the border belongs to provenance.
+   `w` is a workout from /api/calendar; `job` is the push job in flight, or
+   null. Returns null when there is nothing to say. */
+function pushInfo(w, job) {
+  const live = job && (job.items || []).find(i => i.uid === w.uid);
+  if (live && job.state === "running") {
     if (live.state === "pending") return { cls: "", text: "↻ Pushing…" };
   }
   if (live && live.state === "failed") {
     return { cls: "bad", text: "✕ Push failed — " + (live.error && live.error.message ? live.error.message : "Garmin rejected it"), retry: true };
   }
   const g = w.garmin || {};
-  // Said first, because it is the only state where the calendar here and the
+  const rm = g.removal;
+  /* A refused REMOVAL, said first and said as itself.
+     The writer now stops rather than acting on a calendar it could not read,
+     and records that the same way a refused push is recorded: push_state
+     "failed", with the reason on the record. Read back through push_state
+     alone this card said "✕ Push failed" and offered Retry — which SENDS the
+     session. He asked for it to come off. So the removal outcome is answered
+     before the push outcome, in its own words, and it always carries the way
+     to try again: the copy is still on his calendar, and this badge is the
+     only thing on screen pointing at it.
+
+     Gated on `on_garmin` because that is what makes the sentence true. Once
+     nothing of ours is on the calendar there is nothing left to fail to
+     remove, and a warning about an attempt is worse than no warning at all. */
+  if (rm && rm.state === "failed" && g.on_garmin) {
+    return {
+      cls: "bad",
+      text: "✕ Couldn't take it off Garmin — " + (rm.message || "Garmin refused."),
+      remove: true,
+      removeLabel: "Try again",
+      // False when the calendar was read and the row is not provably ours:
+      // pressing the button again will refuse again, and the message says so.
+      // The affordance stays regardless — if he clears it in Garmin Connect,
+      // the retry is what lets this app catch up and forget its record.
+      retryable: rm.retryable !== false
+    };
+  }
+  // Said next, because it is the other state where the calendar here and the
   // calendar on the Edge disagree: he has struck the session off his week and
   // a copy of it is still sitting on the device. Skipping is a local decision
   // and never unschedules anything, so the card has to say the copy is there.
@@ -1502,10 +1663,107 @@ function pushInfo(w) {
   }
   if (g.push_state === "scheduled") return { cls: "good", text: "✓ On Garmin · not yet synced to Edge" };
   if (g.push_state === "drifted") return { cls: "warn", text: "⚠ Changed since it was pushed" };
-  if (g.push_state === "failed") return { cls: "bad", text: "✕ Push failed", retry: true };
+  if (g.push_state === "failed") {
+    /* The writer's own sentence, verbatim. It says which day, what it could
+       not prove, and whether the remedy is to try again or to go and move
+       something in Garmin Connect — all of which "✕ Push failed" threw away. */
+    return {
+      cls: "bad",
+      text: "✕ " + (g.error || "Push failed"),
+      retry: true,
+      // Nothing was sent, but an earlier copy may still be sitting there.
+      remove: !!g.on_garmin
+    };
+  }
   if (w.push_approved) return { cls: "", text: "↑ Approved for push" };
   return null;
 }
+
+/* What one day's Garmin calendar strip says, or null for "nothing worth a
+   line". This is the panel he reads to see what is actually on the account,
+   as opposed to what this app believes it put there, so the one thing it may
+   never do is answer "nothing" when the truth is "no answer". */
+function garminPanel(day) {
+  const g = (day && day.garmin) || {};
+  if (g.scheduled_readable === false) {
+    /* Short, because the calendar is read a month at a time and a failure
+       lands on every day on screen at once — the explanation and the way out
+       belong in one banner, not repeated seven times down the week. What has
+       to be *here* is the mark on the day itself: without it an unanswered
+       day is drawn exactly like a clear one. */
+    return { state: "unreadable", text: "Garmin calendar unread", rows: [] };
+  }
+  const rows = (g.scheduled || []).slice();
+  if (!rows.length) return null;
+  return {
+    state: "read",
+    text: rows.length === 1 ? "1 session on Garmin" : rows.length + " sessions on Garmin",
+    rows: rows.map(r => ({
+      title: r.title || "Untitled workout",
+      ours: !!r.owned_by_us,
+      // Said plainly, because it decides what he can do about it here: this
+      // app only ever touches copies it can prove it wrote.
+      note: r.owned_by_us ? "sent from here" : "yours — not this app's"
+    }))
+  };
+}
+
+/* Days on screen whose Garmin calendar came back unanswered.
+   Said once, at the top, because the calendar is read a month at a time: one
+   failed read blanks every day in view, and seven copies of the same sentence
+   is noise that hides the one thing he needs to know — that the empty days
+   below are not evidence of anything. */
+function unreadableDays(cal) {
+  return ((cal && cal.days) || [])
+    .filter(d => d.garmin && d.garmin.scheduled_readable === false)
+    .map(d => d.date);
+}
+
+function calendarNotices(cal) {
+  const days = unreadableDays(cal);
+  if (!days.length) return [];
+  return [{
+    kind: "warn",
+    title: days.length === 1
+      ? "Couldn't read your Garmin calendar for " + days[0]
+      : "Couldn't read your Garmin calendar for these days",
+    body: "This app can't see what's on your Garmin account right now, so the "
+      + "days below show only your plan. An empty day here is not evidence "
+      + "the day is clear on Garmin. Anything it can't check first will be "
+      + "refused rather than risk a second copy on your Edge.",
+    days: days
+  }];
+}
+
+/* Standing notices about the local store. Today that means migration
+   orphans: push identity the store refused to inherit, which leaves a copy
+   on his Garmin calendar that nothing here will ever remove or update, and
+   that the next push will stack a duplicate beside. He is the only one who
+   can clear it, so it cannot live in /api/status JSON and nowhere else. */
+function storeNotices(status) {
+  const store = (status && status.store) || {};
+  const dropped = store.migration_dropped || 0;
+  if (!dropped) return [];
+  const notes = store.migration_notes || [];
+  return [{
+    kind: "warn",
+    title: dropped === 1
+      ? "1 Garmin session this app can no longer manage"
+      : dropped + " Garmin sessions this app can no longer manage",
+    body: "These were pushed by an older version that left no proof the copy "
+      + "was ours. This app won't remove or update them, and a fresh push "
+      + "will put a second session beside each one. Delete the older copy in "
+      + "Garmin Connect yourself.",
+    items: notes.map(n => ({
+      title: n.title || n.uid || "A workout",
+      date: n.scheduled_for || null,
+      detail: n.message || null
+    }))
+  }];
+}
+
+/* --8<-- ui-logic-end --8<-- */
+/* ═════════════════════════════════════════════════════════════════════════ */
 
 /* ----------------------------------------------------------- proposal card */
 /* One label per engine kind, in his words. The chip and the sentence under it
@@ -2248,8 +2506,25 @@ async function removeFromGarmin(w) {
       // that can only fail.
       try { S.status = await api("/api/status"); } catch (ignored) { /* keep the old one */ }
       render();
+      toast(e.message, "bad");
+      return;
     }
-    toast(e.message, "bad");
+    /* A refusal, not a breakage. The writer stopped rather than act on a
+       calendar it could not read, so the session is exactly where it was and
+       trying again is very often the whole fix.
+
+       Reloading here is the part that used to be missing: without it the card
+       kept whatever it was showing before the attempt, and the one thing on
+       screen that could say "the copy is still there, here's the way off"
+       never appeared. `garmin.removal` on the reloaded workout is what draws
+       the badge and its Try again. */
+    const still = e.detail && e.detail.still_on_garmin;
+    try { await loadAll(); } catch (ignored) { /* the toast still lands */ }
+    const retryable = !e.detail || e.detail.retryable !== false;
+    toast(e.message, "bad",
+      (still && retryable && !removeBlockedReason())
+        ? { label: "Try again", fn: () => removeFromGarmin(w) }
+        : null);
   }
 }
 
@@ -2508,7 +2783,14 @@ function pushDrawer() {
       row.appendChild(t);
       // The honesty component: the ICS has no structured steps, so most
       // sessions land as a timed placeholder. Say so BEFORE it reaches the bike.
-      if (it.reason) row.appendChild(el("div", "pushrow-r", it.reason));
+      const failure = it.error && (it.error.message || String(it.error));
+      if (it.reason) {
+        const r = el("div", "pushrow-r", it.reason);
+        // A refusal travels as both `reason` and `error`. Where it is the
+        // same sentence, it is one problem and reads in one colour.
+        if (failure && failure === it.reason) r.style.color = "var(--status-critical)";
+        row.appendChild(r);
+      }
       // A row that reports a copy still on the calendar has to be actionable
       // from here. Sending is not what clears it — removal is.
       if (it.on_garmin && it.action === "skip") {
@@ -2522,10 +2804,10 @@ function pushDrawer() {
         rm.onclick = () => removeFromGarmin(rmw || { uid: it.uid });
         row.appendChild(rm);
       }
-      if (it.error) {
+      if (failure && failure !== it.reason) {
         const e = el("div", "pushrow-r");
         e.style.color = "var(--status-critical)";
-        e.textContent = it.error.message || String(it.error);
+        e.textContent = failure;
         row.appendChild(e);
       }
       b.appendChild(row);
@@ -2790,12 +3072,7 @@ $("#v-month").onclick = () => {
   S.view = "month"; S.table = false;
   loadAll();
 };
-$("#feedpill").onclick = async () => {
-  S.fetching = true; render();
-  try { await api("/api/refresh", { method: "POST", body: { sources: ["trainingpeaks_ics", "garmin"] } }); }
-  catch (e) { /* the source state itself will report the failure */ }
-  await loadAll(true);
-};
+$("#feedpill").onclick = () => refreshSources();
 $("#themebtn").onclick = () => {
   S.theme = S.theme === "auto" ? "light" : S.theme === "light" ? "dark" : "auto";
   saveLocal();
