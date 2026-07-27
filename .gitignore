@@ -1,0 +1,3 @@
+training-sync/.env
+__pycache__/
+*.pyc
