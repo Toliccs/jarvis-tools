@@ -1,3 +1,10 @@
 training-sync/.env
 __pycache__/
 *.pyc
+
+# Local plan state: your schedule, your notes, your Garmin workout ids.
+# Private data, never committed. Covers the atomic-write temp files and
+# the .corrupt-<ts> backups the store makes if it ever finds bad JSON.
+training-sync/.plan_state.json
+training-sync/.plan_state.json.*
+training-sync/state/

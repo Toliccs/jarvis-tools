@@ -1,4 +1,14 @@
-garminconnect>=0.2.19
+# 0.3.2 is the version the workout-write path was verified against:
+# upload_workout / schedule_workout / unschedule_workout /
+# get_scheduled_workouts / delete_workout. Older releases may not expose
+# the scheduling calls, which would fail at push time rather than install.
+garminconnect>=0.3.2
 requests>=2.31
 python-dotenv>=1.0
 icalendar>=5.0
+
+# Web layer: FastAPI serves the calendar UI and the /api surface, uvicorn
+# runs it locally on port 8765. No build step, no CDN — the front-end is
+# plain HTML/CSS/JS served from training-sync/static/.
+fastapi>=0.110
+uvicorn>=0.27

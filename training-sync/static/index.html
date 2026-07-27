@@ -1,0 +1,2436 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Training Calendar</title>
+<meta name="color-scheme" content="light dark">
+<style>
+/* ==========================================================================
+   TOKENS
+   Intensity is an ORDINAL ramp: one hue, monotone lightness. Distance from the
+   surface = how hard the session is. Validated (monotone L, adjacent dL >= .06,
+   single hue, light-end contrast 2.06:1 light / 2.15:1 dark). The sub-3:1 end
+   step obligates a relief channel -- the always-present intensity WORD and the
+   table view (press T) provide it.
+   Proposal accent is orange, not violet: measured CVD dE 23.1-25.4 against
+   every ramp step in both modes. Violet failed at dE 9.0/12.6.
+   ========================================================================== */
+:root{
+  color-scheme: light dark;
+
+  --ramp-rest:#898781;
+  --ramp-easy:#86b6ef;
+  --ramp-moderate:#3987e5;
+  --ramp-hard:#1c5cab;
+
+  --accent:#eb6834;              /* proposals / Alfred */
+  --accent-wash:rgba(235,104,52,.07);
+  --focus:#1c5cab;
+
+  --status-good:#0ca30c;
+  --status-warning:#fab219;
+  --status-critical:#d03b3b;
+
+  --plane:#f9f9f7;
+  --surface:#fcfcfb;
+  --surface-2:#f2f1ec;
+  --ink:#0b0b0b;
+  --ink-2:#52514e;
+  --ink-muted:#898781;
+  --rule:#e1e0d9;
+  --border:rgba(11,11,11,.10);
+  --meter-track:#cde2fb;
+  --shadow:0 1px 2px rgba(11,11,11,.05), 0 4px 14px rgba(11,11,11,.05);
+  --shadow-lift:0 6px 22px rgba(11,11,11,.16);
+  --hatch:rgba(11,11,11,.08);
+
+  --bar-h:56px;
+  --radius:12px;
+  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+/* Dark by preference -- but an explicit light choice must beat the media query. */
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ramp-easy:#184f95;
+    --ramp-moderate:#2a78d6;
+    --ramp-hard:#86b6ef;
+    --accent:#d95926;
+    --accent-wash:rgba(217,89,38,.12);
+    --focus:#86b6ef;
+    --plane:#0d0d0d;
+    --surface:#1a1a19;
+    --surface-2:#232322;
+    --ink:#ffffff;
+    --ink-2:#c3c2b7;
+    --ink-muted:#898781;
+    --rule:#2c2c2a;
+    --border:rgba(255,255,255,.10);
+    --meter-track:#104281;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 4px 14px rgba(0,0,0,.3);
+    --shadow-lift:0 6px 22px rgba(0,0,0,.55);
+    --hatch:rgba(255,255,255,.09);
+  }
+}
+/* ...and an explicit dark choice must beat a light OS. */
+:root[data-theme="dark"]{
+  --ramp-easy:#184f95;
+  --ramp-moderate:#2a78d6;
+  --ramp-hard:#86b6ef;
+  --accent:#d95926;
+  --accent-wash:rgba(217,89,38,.12);
+  --focus:#86b6ef;
+  --plane:#0d0d0d;
+  --surface:#1a1a19;
+  --surface-2:#232322;
+  --ink:#ffffff;
+  --ink-2:#c3c2b7;
+  --ink-muted:#898781;
+  --rule:#2c2c2a;
+  --border:rgba(255,255,255,.10);
+  --meter-track:#104281;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 4px 14px rgba(0,0,0,.3);
+  --shadow-lift:0 6px 22px rgba(0,0,0,.55);
+  --hatch:rgba(255,255,255,.09);
+}
+
+*,*::before,*::after{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; font-family:var(--font); background:var(--plane); color:var(--ink);
+  font-size:15px; line-height:1.45; -webkit-font-smoothing:antialiased;
+  overflow-x:hidden;
+}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer;background:none;border:none;padding:0}
+h1,h2,h3,h4,p{margin:0}
+:focus-visible{outline:2px solid var(--focus); outline-offset:2px; border-radius:4px}
+.sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+    clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.skip{position:absolute;left:8px;top:-60px;z-index:100;background:var(--surface);
+  padding:10px 16px;border-radius:8px;border:1px solid var(--border);transition:top .12s}
+.skip:focus{top:8px}
+
+/* ---------------------------------------------------------------- A: app bar */
+.appbar{
+  position:sticky; top:0; z-index:40; min-height:var(--bar-h);
+  display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+  padding:8px 20px; background:var(--surface); border-bottom:1px solid var(--rule);
+}
+.brand{display:flex;align-items:center;gap:9px;font-weight:650;letter-spacing:-.01em}
+.brand svg{width:20px;height:20px;color:var(--ramp-moderate)}
+.rangenav{display:flex;align-items:center;gap:2px}
+.iconbtn{
+  width:32px;height:32px;display:grid;place-items:center;border-radius:8px;
+  color:var(--ink-2); border:1px solid transparent;
+}
+.iconbtn:hover{background:var(--surface-2);color:var(--ink)}
+.iconbtn svg{width:17px;height:17px}
+.rangelabel{
+  font-weight:640; font-size:16px; letter-spacing:-.01em; padding:0 8px;
+  min-width:150px; text-align:center;
+}
+.pill{
+  border:1px solid var(--border); border-radius:999px; padding:5px 12px;
+  font-size:13px; color:var(--ink-2); background:var(--surface);
+  display:inline-flex; align-items:center; gap:7px; white-space:nowrap;
+}
+.pill:hover{background:var(--surface-2)}
+.pill .dot{width:7px;height:7px;border-radius:50%;background:var(--status-good);flex:none}
+.pill.warn .dot{background:var(--status-warning)}
+.pill.bad .dot{background:var(--status-critical)}
+.pill.demo{border-color:var(--accent);color:var(--accent);font-weight:600}
+.seg{display:flex;background:var(--surface-2);border-radius:9px;padding:2px;gap:2px}
+.seg button{
+  padding:5px 13px;border-radius:7px;font-size:13.5px;font-weight:550;color:var(--ink-2);
+}
+.seg button[aria-pressed="true"]{background:var(--surface);color:var(--ink);box-shadow:var(--shadow)}
+.spacer{flex:1 1 auto}
+.btn{
+  border:1px solid var(--border); border-radius:9px; padding:7px 14px;
+  font-size:14px; font-weight:560; background:var(--surface); color:var(--ink);
+  display:inline-flex;align-items:center;gap:7px; white-space:nowrap;
+}
+.btn:hover:not(:disabled){background:var(--surface-2)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.primary{background:var(--ink);color:var(--plane);border-color:var(--ink)}
+.btn.primary:hover:not(:disabled){opacity:.88;background:var(--ink)}
+.btn.accent{background:var(--accent);color:#fff;border-color:var(--accent)}
+.btn.accent:hover:not(:disabled){opacity:.9;background:var(--accent)}
+.btn.sm{padding:4px 10px;font-size:13px;border-radius:7px}
+
+/* ------------------------------------------------------------ B: context row */
+.contextrow{
+  position:sticky; top:var(--bar-h); z-index:30;
+  display:flex; align-items:center; gap:10px 18px; flex-wrap:wrap;
+  padding:10px 20px; background:var(--plane); border-bottom:1px solid var(--rule);
+  font-size:13.5px; color:var(--ink-2);
+}
+.ctx-item{display:inline-flex;align-items:center;gap:7px}
+.ctx-item b{color:var(--ink);font-weight:640}
+.ctx-sep{width:1px;height:16px;background:var(--rule)}
+.ctx-warn{color:var(--status-critical);font-weight:560}
+
+/* -------------------------------------------------------- C/D: layout shell */
+.layout{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:0;align-items:start}
+.canvas{padding:18px 20px 28px;min-width:0}
+.rail{
+  position:sticky; top:calc(var(--bar-h) + 44px); align-self:start;
+  height:calc(100vh - var(--bar-h) - 44px); overflow-y:auto;
+  border-left:1px solid var(--rule); background:var(--surface);
+  padding:18px 16px 40px; display:flex; flex-direction:column; gap:18px;
+}
+.railtoggle{display:none}
+
+/* --------------------------------------------------------------- week grid */
+.weekgrid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:10px}
+.daycol{
+  display:flex;flex-direction:column;min-width:0;border-radius:var(--radius);
+  background:var(--plane); position:relative;
+}
+.daycol.today .dayhead{box-shadow:inset 2px 0 0 var(--ramp-moderate)}
+.daycol.today .dayname b{color:var(--ramp-moderate)}
+.dayhead{
+  border:1px solid var(--border); border-radius:10px; background:var(--surface);
+  padding:9px 10px; margin-bottom:9px; text-align:left; width:100%;
+  display:flex; flex-direction:column; gap:5px; transition:background .12s;
+}
+.dayhead:hover{background:var(--surface-2)}
+.dayname{display:flex;align-items:baseline;gap:6px;font-size:12.5px;color:var(--ink-muted);
+  text-transform:uppercase;letter-spacing:.06em;font-weight:600}
+.dayname b{font-size:17px;color:var(--ink);letter-spacing:-.02em;text-transform:none}
+.dayfoot{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;color:var(--ink-2)}
+.daytss{font-variant-numeric:tabular-nums}
+.availglyph{
+  display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;
+  padding:2px 7px;border-radius:999px;background:var(--surface-2);color:var(--ink-2);
+}
+.availglyph svg{width:11px;height:11px}
+.daycol.unavailable .availglyph{background:var(--status-warning);color:#3a2a00}
+.conflictbadge{
+  display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:620;
+  padding:2px 7px;border-radius:999px;
+  background:color-mix(in srgb, var(--status-warning) 22%, transparent);
+  color:var(--ink);
+}
+.conflictbadge svg{width:11px;height:11px;color:var(--status-warning)}
+
+.dropzone{
+  flex:1; min-height:120px; display:flex; flex-direction:column; gap:9px;
+  padding:3px; border-radius:10px; border:2px dashed transparent; transition:border-color .12s, background .12s;
+}
+.dropzone.over{border-color:var(--accent);background:var(--accent-wash)}
+.dropzone.blocked{border-color:var(--status-critical);background:color-mix(in srgb,var(--status-critical) 8%,transparent)}
+.daycol.unavailable{background:
+  repeating-linear-gradient(45deg, var(--hatch) 0 6px, transparent 6px 12px);
+}
+.daycol.unavailable .dayhead,.daycol.unavailable .card{opacity:.82}
+.emptyday{
+  font-size:12px;color:var(--ink-muted);text-align:center;padding:14px 6px;
+  border:1px dashed var(--rule);border-radius:10px;
+}
+
+/* -------------------------------------------------------------- workout card */
+.card{
+  display:flex;flex-direction:column;background:var(--surface);
+  border:1px solid var(--border);border-radius:var(--radius);
+  box-shadow:var(--shadow); overflow:hidden; min-height:92px;
+  transition:box-shadow .14s, transform .14s, opacity .14s;
+}
+.card:hover{box-shadow:var(--shadow-lift)}
+.card[draggable="true"]{cursor:grab}
+.card.dragging{opacity:.5;transform:scale(1.02);cursor:grabbing}
+@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-5px)}75%{transform:translateX(5px)}}
+.card.shake{animation:shake .12s 1}
+.card.carried{outline:2px dashed var(--accent);outline-offset:2px}
+.card-body{display:flex;align-items:stretch;min-width:0}
+.card-bar{width:4px;flex:none;background:var(--intensity,var(--ramp-rest))}
+.card.unknown-int .card-bar{
+  background:repeating-linear-gradient(45deg,var(--ink-muted) 0 3px,transparent 3px 6px);
+}
+/* The title gets the full column width: the menu is lifted out of the flow into
+   the corner and the sport glyph sits down in the meta row. At a 146px week
+   column every pixel of chrome on the title line costs a readable word. */
+.card-main{position:relative;flex:1;min-width:0;padding:10px 11px;
+  display:flex;flex-direction:column;gap:6px}
+.card-top{display:flex;align-items:flex-start}
+.glyph{width:14px;height:14px;flex:none;color:var(--ink-2)}
+.card-title{
+  min-width:0;width:100%;padding-right:20px;
+  font-size:14.5px;font-weight:620;line-height:1.28;letter-spacing:-.01em;
+  overflow-wrap:break-word;
+  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;
+}
+/* proposal cards carry no ⋮ menu, so they don't reserve room for one */
+.card.proposal .card-title{padding-right:0}
+.card-menu{
+  position:absolute;top:6px;right:4px;z-index:1;
+  width:22px;height:22px;display:grid;place-items:center;border-radius:6px;
+  color:var(--ink-muted);font-size:15px;line-height:1;
+}
+.card-menu:hover{background:var(--surface-2);color:var(--ink)}
+.card-meta{display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:12.5px;color:var(--ink-2)}
+.card-meta .num{font-variant-numeric:tabular-nums}
+.tss.low{border-bottom:1px dotted var(--ink-muted);cursor:help}
+/* Intensity gets its own row so the meter and its WORD never get squeezed out
+   by the duration/TSS pair -- the word is the relief channel for the ramp. */
+.intwrap{display:flex;align-items:center;gap:6px}
+.meter{display:flex;gap:2px}
+.meter i{width:7px;height:8px;border-radius:1.5px;background:var(--rule);display:block}
+.meter i.on{background:var(--intensity,var(--ramp-rest))}
+.intword{font-weight:600;color:var(--ink-2);font-size:12px}
+.card-prov{
+  font-size:11.5px;color:var(--ink-muted);display:flex;align-items:center;gap:5px;
+}
+.card-note{font-size:11.5px;color:var(--ink-2);font-style:italic}
+.card-push{
+  display:flex;align-items:center;gap:6px;padding:6px 11px;font-size:11.5px;font-weight:560;
+  border-top:1px solid var(--border);background:var(--surface-2);color:var(--ink-2);
+}
+.card-push.good{background:color-mix(in srgb,var(--status-good) 12%,transparent);color:var(--ink)}
+.card-push.warn{background:color-mix(in srgb,var(--status-warning) 20%,transparent);color:var(--ink)}
+.card-push.bad{background:color-mix(in srgb,var(--status-critical) 14%,transparent);color:var(--ink)}
+.card-push .rt{margin-left:auto}
+.chip{
+  display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:640;
+  padding:2px 7px;border-radius:999px;background:var(--surface-2);color:var(--ink-2);
+  letter-spacing:.01em;
+}
+.chip.accent{background:var(--accent-wash);color:var(--accent)}
+.chip.warn{background:color-mix(in srgb,var(--status-warning) 24%,transparent);color:var(--ink)}
+
+/* moved / proposed / approved -- provenance lives on the BORDER,
+   push outcome lives on the bottom STRIP. Different channel, different region,
+   so the two never render as adjacent same-shaped marks. */
+.card.moved{border-color:var(--ink-muted)}
+.card.approved{border:2px solid var(--accent)}
+.card.proposal{
+  border:2px dashed var(--accent); background:var(--accent-wash);
+  box-shadow:none; cursor:pointer;
+}
+.card.proposal:hover{box-shadow:var(--shadow)}
+.card.proposal.selected{box-shadow:0 0 0 3px var(--accent-wash),var(--shadow-lift)}
+/* Clamped in the column; the full text always lives in the rail's Why? panel,
+   so a long rationale can't turn one card into the whole week. */
+.prop-reason{font-size:12.5px;color:var(--ink-2);line-height:1.4;
+  display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
+.prop-q{
+  font-size:12px;font-weight:600;color:var(--ink);background:var(--surface);
+  border:1px solid var(--accent);border-radius:8px;padding:6px 8px;
+}
+.prop-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:2px}
+.ghost{
+  border:1px dashed var(--ink-muted);border-radius:10px;padding:8px 10px;
+  opacity:.55;font-size:12px;color:var(--ink-2);background:transparent;
+  display:flex;align-items:center;gap:6px;
+}
+.suggest-strip{
+  display:flex;align-items:center;gap:6px;padding:6px 11px;font-size:11.5px;
+  border-top:1px dashed var(--accent);background:var(--accent-wash);color:var(--accent);
+  font-weight:600;
+}
+
+/* ------------------------------------------------------------- month grid */
+.monthgrid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px}
+.monthdow{
+  font-size:11.5px;font-weight:650;color:var(--ink-muted);text-transform:uppercase;
+  letter-spacing:.06em;text-align:center;padding-bottom:4px;
+}
+.mcell{
+  min-height:96px;border:1px solid var(--border);border-radius:10px;background:var(--surface);
+  padding:7px;display:flex;flex-direction:column;gap:5px;text-align:left;width:100%;
+}
+.mcell.out{opacity:.4}
+.mcell.today{box-shadow:inset 0 0 0 2px var(--ramp-moderate)}
+.mcell.unavailable{
+  background:
+   repeating-linear-gradient(45deg,var(--hatch) 0 6px,transparent 6px 12px),var(--surface);
+}
+.mcell:hover{background:var(--surface-2)}
+.mdate{font-size:12.5px;font-weight:640;display:flex;align-items:center;gap:5px}
+.mdate .lock{color:var(--status-warning);width:11px;height:11px}
+.mchip{
+  display:flex;align-items:center;gap:5px;font-size:11px;color:var(--ink-2);
+  background:var(--surface-2);border-radius:6px;padding:3px 5px;min-width:0;
+}
+.mchip .idot{width:7px;height:7px;border-radius:50%;background:var(--intensity);flex:none}
+.mchip .mt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mchip svg{width:11px;height:11px;flex:none}
+
+/* -------------------------------------------------------------- signal rail */
+.tile{border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);padding:14px}
+.rail .tile{background:var(--plane)}
+.tile-h{
+  font-size:11.5px;font-weight:660;text-transform:uppercase;letter-spacing:.07em;
+  color:var(--ink-muted);margin-bottom:9px;
+}
+.hero{font-size:46px;font-weight:680;line-height:1;letter-spacing:-.03em}
+.hero-row{display:flex;align-items:baseline;gap:9px}
+.hero-word{font-size:13px;font-weight:640;color:var(--ink-2)}
+.readymeter{height:9px;border-radius:999px;background:var(--meter-track);margin-top:11px;overflow:hidden}
+.readymeter span{display:block;height:100%;border-radius:999px;background:var(--ramp-moderate)}
+.readymeter.warn span{background:var(--status-warning)}
+.readymeter.bad span{background:var(--status-critical)}
+.tile-sub{font-size:12.5px;color:var(--ink-2);margin-top:9px;line-height:1.45}
+.statuschip{
+  display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;
+  background:var(--surface-2);font-size:13px;font-weight:600;
+}
+.statuschip svg{width:13px;height:13px;color:var(--ink-2)}
+
+/* 7-day load: single series -> ONE color for every bar, no legend (the title
+   names it). Today gets a ring + direct label, never a different hue. */
+/* stretch, not flex-end: the columns must fill the chart height or the track
+   collapses to its content and every bar renders as a 2px stub. */
+.loadchart{display:flex;align-items:stretch;gap:2px;height:92px;margin-top:6px}
+.loadcol{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;min-width:0}
+.loadbar-track{flex:1;width:100%;display:flex;align-items:flex-end;justify-content:center}
+.loadbar{
+  width:100%;max-width:24px;background:var(--ramp-moderate);
+  border-radius:4px 4px 0 0; min-height:2px;
+}
+.loadbar.is-today{box-shadow:0 0 0 2px var(--surface),0 0 0 4px var(--ramp-moderate)}
+.loadbar.zero{background:var(--rule);border-radius:2px}
+.loadlab{font-size:10.5px;color:var(--ink-muted);font-variant-numeric:tabular-nums}
+.loadval{font-size:10.5px;color:var(--ink-2);font-weight:640;font-variant-numeric:tabular-nums;min-height:14px}
+.acts{display:flex;flex-direction:column;gap:9px}
+.act{display:flex;gap:9px;align-items:flex-start;font-size:12.5px}
+.act svg{width:14px;height:14px;color:var(--ink-2);flex:none;margin-top:2px}
+.act-n{font-weight:600;line-height:1.3}
+.act-m{color:var(--ink-muted);font-size:11.5px;font-variant-numeric:tabular-nums}
+.rationale{border:1px solid var(--accent);border-radius:var(--radius);background:var(--accent-wash);padding:14px}
+.rationale .tile-h{color:var(--accent)}
+.evidence{display:flex;flex-direction:column;gap:5px;margin-top:10px}
+.ev{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;
+  border-bottom:1px solid var(--border);padding-bottom:4px}
+.ev span:last-child{font-weight:640;font-variant-numeric:tabular-nums;text-align:right}
+.altlist{margin:8px 0 0;padding-left:16px;font-size:12px;color:var(--ink-2);line-height:1.5}
+
+/* --------------------------------------------------------------- change bar */
+.changebar{
+  position:sticky;bottom:0;z-index:35;display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  padding:11px 20px;background:var(--surface);border-top:2px solid var(--accent);
+  box-shadow:0 -4px 18px rgba(0,0,0,.07);
+}
+.changebar .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none}
+.changebar b{font-weight:640}
+
+/* ------------------------------------------------------------------ banners */
+.banner{
+  border:1px solid var(--border);border-left:3px solid var(--ink-muted);border-radius:10px;
+  background:var(--surface);padding:12px 14px;margin-bottom:14px;display:flex;gap:11px;
+  align-items:flex-start;font-size:13.5px;line-height:1.5;
+}
+.banner svg{width:16px;height:16px;flex:none;margin-top:2px;color:var(--ink-muted)}
+.banner.warn{border-left-color:var(--status-warning)}
+.banner.warn svg{color:var(--status-warning)}
+.banner.bad{border-left-color:var(--status-critical)}
+.banner.bad svg{color:var(--status-critical)}
+.banner .bt{font-weight:640;display:block;margin-bottom:2px}
+.banner .ba{margin-left:auto;display:flex;gap:6px;flex:none}
+.banner code{
+  background:var(--surface-2);padding:1px 5px;border-radius:4px;font-size:12.5px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+.emptystate{
+  text-align:center;padding:60px 24px;color:var(--ink-2);max-width:560px;margin:0 auto;
+}
+.emptystate h2{font-size:19px;font-weight:660;color:var(--ink);margin-bottom:8px;letter-spacing:-.01em}
+.emptystate p{font-size:14px;line-height:1.6;margin-bottom:14px}
+
+/* ------------------------------------------------------- popovers & drawers */
+.backdrop{position:fixed;inset:0;background:rgba(0,0,0,.32);z-index:50}
+.popover{
+  position:absolute;z-index:60;background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);box-shadow:var(--shadow-lift);padding:14px;width:270px;
+  display:flex;flex-direction:column;gap:11px;
+}
+.popover h4{font-size:13.5px;font-weight:660}
+.pop-row{display:flex;gap:6px;flex-wrap:wrap}
+.pop-row button{
+  border:1px solid var(--border);border-radius:8px;padding:6px 11px;font-size:13px;flex:1;
+  background:var(--surface);
+}
+.pop-row button:hover{background:var(--surface-2)}
+.pop-row button[aria-pressed="true"]{background:var(--ink);color:var(--plane);border-color:var(--ink)}
+.pop-lab{font-size:11.5px;font-weight:640;color:var(--ink-muted);text-transform:uppercase;letter-spacing:.06em}
+.checkrow{display:flex;align-items:center;gap:8px;font-size:13px}
+.checkrow input{width:16px;height:16px;accent-color:var(--ramp-moderate)}
+.drawer{
+  position:fixed;top:0;right:0;bottom:0;width:min(460px,100%);z-index:60;
+  background:var(--surface);border-left:1px solid var(--rule);box-shadow:var(--shadow-lift);
+  display:flex;flex-direction:column;
+}
+.drawer-h{
+  display:flex;align-items:center;gap:10px;padding:15px 18px;border-bottom:1px solid var(--rule);
+}
+.drawer-h h3{font-size:16px;font-weight:660;letter-spacing:-.01em}
+.drawer-b{flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:11px}
+.drawer-f{padding:14px 18px;border-top:1px solid var(--rule);display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+.pushrow{border:1px solid var(--border);border-radius:10px;padding:11px 12px;
+  display:flex;flex-direction:column;gap:6px;background:var(--plane)}
+.pushrow-t{display:flex;align-items:center;gap:8px}
+.pushrow-t .pt{font-weight:620;font-size:13.5px;flex:1;min-width:0}
+.pushrow-r{font-size:12px;color:var(--ink-2);line-height:1.45}
+.actionchip{font-size:10.5px;font-weight:680;text-transform:uppercase;letter-spacing:.05em;
+  padding:2px 7px;border-radius:999px;background:var(--surface-2);color:var(--ink-2);flex:none}
+.actionchip.create{background:color-mix(in srgb,var(--ramp-moderate) 20%,transparent);color:var(--ink)}
+.actionchip.skip{background:var(--surface-2)}
+.actionchip.done{background:color-mix(in srgb,var(--status-good) 18%,transparent);color:var(--ink)}
+.actionchip.failed{background:color-mix(in srgb,var(--status-critical) 18%,transparent);color:var(--ink)}
+.progress{height:4px;border-radius:999px;background:var(--surface-2);overflow:hidden;flex:1}
+.progress span{display:block;height:100%;background:var(--ramp-moderate);border-radius:999px;transition:width .2s}
+
+/* -------------------------------------------------------------- table view */
+.tablewrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-size:13px;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--rule);white-space:nowrap}
+th{font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-muted);
+  font-weight:660;position:sticky;top:0;background:var(--surface)}
+tbody tr:last-child td{border-bottom:none}
+td.wrap{white-space:normal;min-width:190px}
+
+/* ------------------------------------------------------------------- toast */
+.toast{
+  position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:80;
+  background:var(--ink);color:var(--plane);padding:11px 16px;border-radius:10px;
+  box-shadow:var(--shadow-lift);display:flex;align-items:center;gap:14px;
+  font-size:13.5px;max-width:min(560px,92vw);
+}
+.toast button{color:var(--plane);font-weight:660;text-decoration:underline;font-size:13.5px;flex:none}
+.toast.bad{background:var(--status-critical);color:#fff}
+.toast.bad button{color:#fff}
+
+.kbd{
+  display:inline-block;border:1px solid var(--border);border-bottom-width:2px;border-radius:5px;
+  padding:1px 6px;font-size:11.5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  background:var(--surface-2);
+}
+.helpgrid{display:grid;grid-template-columns:auto 1fr;gap:9px 14px;font-size:13px;align-items:center}
+
+/* --------------------------------------------------------------- responsive */
+@media (max-width:1280px){
+  .layout{grid-template-columns:minmax(0,1fr)}
+  .rail{
+    position:fixed;top:0;right:0;bottom:0;width:min(340px,90vw);height:100%;z-index:60;
+    box-shadow:var(--shadow-lift);
+  }
+  .rail[hidden]{display:none}
+  .railtoggle{display:inline-flex}
+}
+/* Seven 140px columns do not survive a phone. Below 1024 the week becomes a
+   vertical day list so card anatomy stays intact instead of shrinking into
+   illegibility. Month view stays a grid but drops to chips-only. */
+@media (max-width:1023px){
+  .weekgrid{grid-template-columns:minmax(0,1fr);gap:12px}
+  .daycol{border:1px solid var(--border);background:var(--surface);padding:10px}
+  .daycol.unavailable{background:
+    repeating-linear-gradient(45deg,var(--hatch) 0 6px,transparent 6px 12px),var(--surface)}
+  .dayhead{border:none;background:transparent;padding:2px 2px 6px;margin-bottom:6px;
+    flex-direction:row;align-items:center;justify-content:space-between;gap:10px}
+  .dayhead:hover{background:transparent}
+  .dayname{align-items:baseline}
+  .dayfoot{justify-content:flex-end}
+  .dropzone{min-height:0}
+  .emptyday{padding:9px}
+  .canvas{padding:14px 12px 24px}
+  .appbar{padding:8px 12px;gap:9px}
+  .contextrow{padding:9px 12px;top:auto;position:static}
+  .rangelabel{min-width:0;font-size:15px}
+  .mcell{min-height:70px}
+  .brand span{display:none}
+}
+@media (max-width:560px){
+  .hero{font-size:40px}
+  .drawer{width:100%}
+  .rangelabel{padding:0 4px}
+  .btn{padding:7px 10px;font-size:13.5px}
+  /* Keep the app bar to two rows: the feed pill keeps its status dot but
+     drops its text, which is repeated in the banner when it matters. */
+  #feedtext{display:none}
+  .pill{padding:6px 9px}
+  .appbar{gap:6px;padding:7px 10px}
+  .seg button{padding:5px 10px}
+  .contextrow{gap:8px 12px;font-size:13px}
+}
+@media (prefers-reduced-motion:reduce){
+  *{transition:none!important;animation:none!important}
+  .card.dragging{transform:none}
+}
+@media (forced-colors:active){
+  .card,.dayhead,.tile,.mcell{border:1px solid CanvasText}
+  .card.proposal{border:2px dashed Highlight}
+  .card-bar{forced-color-adjust:none}
+  .loadbar{forced-color-adjust:none}
+}
+@media print{
+  .appbar,.rail,.changebar,.dropzone{display:none}
+}
+</style>
+</head>
+<body>
+
+<a class="skip" href="#canvas">Skip to calendar</a>
+
+<svg class="sr" aria-hidden="true"><defs>
+  <symbol id="g-bike" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+    stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="5.5" cy="17" r="3.5"/><circle cx="18.5" cy="17" r="3.5"/>
+    <path d="M5.5 17 9 8h5l-3 9h7.5M14 8l1.5-3.5h2.5"/><circle cx="11" cy="17" r=".6" fill="currentColor"/>
+  </symbol>
+  <symbol id="g-run" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+    stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="14" cy="4.5" r="2"/><path d="M8 21l3-5-2.5-3 1-5.5 4 2 2.5 3h3"/><path d="M11.5 7.5 7 9"/>
+    <path d="M13 16l3 5"/>
+  </symbol>
+  <symbol id="g-swim" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+    stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="16.5" cy="7" r="1.8"/><path d="M3 12.5 7 10l4.5 3 3-2"/>
+    <path d="M2 18c1.6 0 1.6 1.4 3.2 1.4S6.8 18 8.4 18s1.6 1.4 3.2 1.4S13.2 18 14.8 18s1.6 1.4 3.2 1.4S19.6 18 21.2 18"/>
+  </symbol>
+  <symbol id="g-strength" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+    stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 9v6M6 7v10M18 7v10M21 9v6M6 12h12"/>
+  </symbol>
+  <symbol id="g-rest" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+    stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a6.8 6.8 0 0 0 10.5 10.5z"/>
+  </symbol>
+  <symbol id="g-dot" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+    stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="8"/><path d="M12 8v4.5M12 16h.01"/>
+  </symbol>
+  <symbol id="g-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+    stroke-linecap="round" stroke-linejoin="round">
+    <rect x="4" y="10.5" width="16" height="10" rx="2"/><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5"/>
+  </symbol>
+  <symbol id="g-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
+    stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5 9.5 17.5 19.5 6.5"/></symbol>
+  <symbol id="g-warn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+    stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 3.5 22 20H2z"/><path d="M12 10v4M12 17h.01"/></symbol>
+  <symbol id="g-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+    stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
+  <symbol id="g-left" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+    stroke-linecap="round" stroke-linejoin="round"><path d="M15 5 8 12l7 7"/></symbol>
+  <symbol id="g-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+    stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></symbol>
+  <symbol id="g-theme" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+    stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/>
+  </symbol>
+  <symbol id="g-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+    stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="g-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+    stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V5M5 12l7-7 7 7"/></symbol>
+  <symbol id="g-spark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+    stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z"/></symbol>
+  <symbol id="g-panel" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+    stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="4" width="18" height="16" rx="2"/><path d="M14 4v16"/></symbol>
+</defs></svg>
+
+<header class="appbar">
+  <div class="brand"><svg aria-hidden="true"><use href="#g-bike"/></svg><span>Training</span></div>
+
+  <div class="rangenav">
+    <button class="iconbtn" id="prev" aria-label="Previous"><svg aria-hidden="true"><use href="#g-left"/></svg></button>
+    <span class="rangelabel" id="rangelabel" aria-live="polite">&nbsp;</span>
+    <button class="iconbtn" id="next" aria-label="Next"><svg aria-hidden="true"><use href="#g-right"/></svg></button>
+  </div>
+  <button class="btn sm" id="today">Today</button>
+
+  <div class="seg" role="group" aria-label="View">
+    <button id="v-week" aria-pressed="true">Week</button>
+    <button id="v-month" aria-pressed="false">Month</button>
+  </div>
+
+  <div class="spacer"></div>
+
+  <button class="pill" id="feedpill" title="Click to refetch from TrainingPeaks and Garmin">
+    <span class="dot"></span><span id="feedtext">loading</span>
+  </button>
+  <button class="iconbtn railtoggle" id="railbtn" aria-label="Show training signal">
+    <svg aria-hidden="true"><use href="#g-panel"/></svg></button>
+  <button class="iconbtn" id="themebtn" aria-label="Switch theme">
+    <svg aria-hidden="true"><use href="#g-theme"/></svg></button>
+  <button class="btn primary" id="pushbtn" disabled>Push to Garmin</button>
+</header>
+
+<div class="contextrow" id="contextrow"></div>
+
+<main class="layout">
+  <section class="canvas" id="canvas" tabindex="-1">
+    <div id="banners"></div>
+    <div id="grid"></div>
+  </section>
+  <aside class="rail" id="rail" aria-label="Training signal"></aside>
+</main>
+
+<div id="changebar"></div>
+<div id="overlays"></div>
+<div class="sr" role="status" aria-live="polite" id="live"></div>
+
+<script>
+"use strict";
+
+/* =========================================================================
+   Training Calendar front-end.
+
+   Backend contract (all read/written here):
+     GET    /api/status
+     POST   /api/refresh
+     GET    /api/calendar?start&end&include_proposals
+     PUT    /api/days/{date}/availability      {state,note,max_minutes}
+     DELETE /api/days/{date}/availability
+     POST   /api/workouts/{uid}/move           {to_date,expected_rev,allow_unavailable}
+     PATCH  /api/workouts/{uid}                {push_approved,status,...}
+     DELETE /api/workouts/{uid}/override
+     POST   /api/proposals                     {start,end,reason}
+     POST   /api/proposals/{id}/approve        {force}
+     POST   /api/proposals/{id}/reject         {reason}
+     POST   /api/push                          {start,end,select,dry_run}
+     GET    /api/push/{job_id}
+
+   TrainingPeaks is never written to. Every write below targets the local
+   override store or Garmin Connect.
+   ========================================================================= */
+
+const $ = (s, r) => (r || document).querySelector(s);
+const el = (tag, cls, txt) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (txt != null) n.textContent = txt;
+  return n;
+};
+const svg = (id, cls) => {
+  const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  if (cls) s.setAttribute("class", cls);
+  s.setAttribute("aria-hidden", "true");
+  const u = document.createElementNS("http://www.w3.org/2000/svg", "use");
+  u.setAttribute("href", "#" + id);
+  s.appendChild(u);
+  return s;
+};
+
+/* ------------------------------------------------------------------ dates */
+const DAYNAMES = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const iso = d => {
+  const p = n => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+};
+const parseISO = s => { const [y,m,d] = s.split("-").map(Number); return new Date(y, m-1, d); };
+const addDays = (s, n) => { const d = parseISO(s); d.setDate(d.getDate() + n); return iso(d); };
+const mondayOf = s => { const d = parseISO(s); const w = (d.getDay() + 6) % 7; d.setDate(d.getDate() - w); return iso(d); };
+const dowIndex = s => (parseISO(s).getDay() + 6) % 7;      // 0 = Monday
+const todayISO = () => iso(new Date());
+const shortDay = s => DAYNAMES[dowIndex(s)];
+const longDay = s => ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"][dowIndex(s)];
+const dayNum = s => parseISO(s).getDate();
+const monName = s => MONTHS[parseISO(s).getMonth()];
+
+function rangeLabel() {
+  if (S.view === "month") {
+    const d = parseISO(S.anchor);
+    return MONTHS[d.getMonth()] + " " + d.getFullYear();
+  }
+  const a = S.anchor, b = addDays(a, 6);
+  const sameMonth = parseISO(a).getMonth() === parseISO(b).getMonth();
+  return sameMonth
+    ? monName(a) + " " + dayNum(a) + " – " + dayNum(b)
+    : monName(a) + " " + dayNum(a) + " – " + monName(b) + " " + dayNum(b);
+}
+/* Whole weeks covering the month, so the grid is always rectangular. */
+function monthGridRange() {
+  const d = parseISO(S.anchor);
+  const first = iso(new Date(d.getFullYear(), d.getMonth(), 1));
+  const last = iso(new Date(d.getFullYear(), d.getMonth() + 1, 0));
+  return { start: mondayOf(first), end: addDays(mondayOf(last), 6) };
+}
+/* The range the current view needs from /api/calendar. */
+function viewRange() {
+  return S.view === "week"
+    ? { start: S.anchor, end: addDays(S.anchor, 6) }
+    : monthGridRange();
+}
+
+function ago(ts) {
+  if (!ts) return "never";
+  const t = Date.parse(ts.endsWith("Z") || ts.includes("+") ? ts : ts + "Z");
+  if (isNaN(t)) return "unknown";
+  const m = Math.round((Date.now() - t) / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return m + "m ago";
+  const h = Math.round(m / 60);
+  if (h < 36) return h + "h ago";
+  return Math.round(h / 24) + "d ago";
+}
+
+/* ------------------------------------------------------------ encoding maps */
+/* Ordinal ramp: 4 steps. The engine has 7 intensity classes, so the ramp step
+   carries "how hard", the WORD carries which class, and the meter agrees with
+   the step. Intensity is never color-alone. */
+const INTENSITY = {
+  REST:      { step: "rest",     word: "Rest",      segs: 0 },
+  RECOVERY:  { step: "easy",     word: "Recovery",  segs: 1 },
+  ENDURANCE: { step: "easy",     word: "Endurance", segs: 1 },
+  TEMPO:     { step: "moderate", word: "Tempo",     segs: 2 },
+  THRESHOLD: { step: "hard",     word: "Threshold", segs: 3 },
+  VO2:       { step: "hard",     word: "VO2",       segs: 4 },
+  RACE:      { step: "hard",     word: "Race",      segs: 4 },
+  UNKNOWN:   { step: "unknown",  word: "Unknown",   segs: 0 }
+};
+const RAMP = {
+  rest: "var(--ramp-rest)", easy: "var(--ramp-easy)",
+  moderate: "var(--ramp-moderate)", hard: "var(--ramp-hard)",
+  unknown: "var(--ink-muted)"
+};
+const SPORT_GLYPH = {
+  cycling: "g-bike", running: "g-run", swimming: "g-swim",
+  strength: "g-strength", other: "g-dot", unknown: "g-dot"
+};
+
+function intensityOf(w) {
+  const c = w.classification || {};
+  const key = (c.intensity || "UNKNOWN").toUpperCase();
+  return INTENSITY[key] || INTENSITY.UNKNOWN;
+}
+function glyphOf(w) {
+  if (intensityOf(w).step === "rest") return "g-rest";
+  return SPORT_GLYPH[w.sport] || "g-dot";
+}
+function fmtDur(secs) {
+  if (!secs) return null;
+  const m = Math.round(secs / 60);
+  if (m < 60) return m + " min";
+  return Math.floor(m / 60) + ":" + String(m % 60).padStart(2, "0");
+}
+/* The app never shows a bare number it guessed:
+     explicit TSS      -> "82 TSS"
+     derived, medium   -> "~82 TSS"
+     derived, low      -> "~82 TSS?"  dotted underline + the matched source text */
+function tssOf(w) {
+  const c = w.classification || {};
+  const v = w.planned_tss;
+  if (v == null) return null;
+  const n = Math.round(v);
+  // "0 TSS" on a rest day is noise, not information.
+  if (!n) return null;
+  if (c.tss != null) return { text: n + " TSS", low: false };
+  const lc = (c.load_confidence || "NONE").toUpperCase();
+  if (lc === "HIGH") return { text: n + " TSS", low: false };
+  if (lc === "MED") return { text: "~" + n + " TSS", low: false, hint: "Estimated from duration and intensity." };
+  return {
+    text: "~" + n + " TSS?", low: true,
+    hint: "Rough estimate — the feed didn't state a TSS."
+      + ((c.evidence && c.evidence.length) ? " Read from: " + c.evidence.join(", ") : "")
+  };
+}
+/* `no_structure` is true of nearly every ICS workout — it is the norm, not a
+   conflict. Badging it would make every day warn and destroy the signal. It is
+   surfaced honestly in the push preview instead. */
+const CONFLICT_TEXT = {
+  day_unavailable: "on a day you marked unavailable",
+  double_booked: "two sessions on one day",
+  past_date: "in the past"
+};
+const realConflicts = w => (w.conflicts || []).filter(c => CONFLICT_TEXT[c]);
+
+/* --------------------------------------------------------------- app state */
+const S = {
+  view: "week",
+  anchor: mondayOf(todayISO()),
+  theme: "auto",
+  status: null,
+  cal: null,
+  signal: null,          // trailing 7-day window, for the rail
+  error: null,
+  fetching: false,
+  selectedProposal: null,
+  dragUid: null,         // pointer drag: uid in flight
+  carry: null,           // keyboard drag: uid being carried
+  focusDate: todayISO(),
+  pushJob: null,
+  pushPreview: null,
+  drawer: null,          // 'push' | 'help' | null
+  railOpen: false,
+  table: false,
+  toast: null,
+  pollTimer: null
+};
+
+const LS = "training-calendar-v1";
+function saveLocal() {
+  try {
+    localStorage.setItem(LS, JSON.stringify({
+      view: S.view, anchor: S.anchor, theme: S.theme,
+      cal: S.cal, signal: S.signal, status: S.status, at: Date.now()
+    }));
+  } catch (e) { /* quota / private mode — the app still works, just not offline */ }
+}
+function loadLocal() {
+  try {
+    const raw = localStorage.getItem(LS);
+    if (!raw) return;
+    const d = JSON.parse(raw);
+    if (d.theme) S.theme = d.theme;
+    if (d.view) S.view = d.view;
+    // Anchor on today, not on wherever the user last was.
+    if (d.cal) S.cal = d.cal;
+    if (d.signal) S.signal = d.signal;
+    if (d.status) S.status = d.status;
+  } catch (e) { /* corrupt cache is not fatal — we just refetch */ }
+}
+
+/* ------------------------------------------------------------------- fetch */
+class ApiError extends Error {
+  constructor(code, message, detail, httpStatus) {
+    super(message); this.code = code; this.detail = detail || {}; this.httpStatus = httpStatus;
+  }
+}
+async function api(path, opts) {
+  const o = Object.assign({ headers: {} }, opts || {});
+  if (o.body != null && typeof o.body !== "string") {
+    o.headers["Content-Type"] = "application/json";
+    o.body = JSON.stringify(o.body);
+  }
+  let res;
+  try {
+    res = await fetch(path, o);
+  } catch (e) {
+    throw new ApiError("network", "Can't reach the training-sync server. Is it running?", {}, 0);
+  }
+  let data = null;
+  const text = await res.text();
+  if (text) { try { data = JSON.parse(text); } catch (e) { data = null; } }
+  if (!res.ok) {
+    const err = (data && data.error) || {};
+    throw new ApiError(err.code || "http_" + res.status,
+      err.message || ("Request failed (" + res.status + ")."), err.detail, res.status);
+  }
+  return data;
+}
+
+async function loadAll(force) {
+  S.fetching = true;
+  render();
+  const r = viewRange();
+  try {
+    const [status, cal] = await Promise.all([
+      api("/api/status"),
+      api("/api/calendar?start=" + r.start + "&end=" + r.end + "&include_proposals=true")
+    ]);
+    S.status = status;
+    S.cal = cal;
+    S.error = null;
+    // Trailing 7 days feeds the rail: readiness is a today-signal and "7-day
+    // load" means the last 7 days, not whichever week is on screen.
+    const sEnd = todayISO(), sStart = addDays(sEnd, -6);
+    if (sStart >= r.start && sEnd <= r.end) {
+      S.signal = { start: sStart, end: sEnd, days: cal.days, training_status: cal.training_status };
+    } else {
+      try {
+        const sig = await api("/api/calendar?start=" + sStart + "&end=" + sEnd + "&include_proposals=false");
+        S.signal = { start: sStart, end: sEnd, days: sig.days, training_status: sig.training_status };
+      } catch (e) { /* rail degrades to "no data"; the calendar still renders */ }
+    }
+  } catch (e) {
+    // Never a blank page: keep the last render and say what went wrong.
+    S.error = e;
+  } finally {
+    S.fetching = false;
+    saveLocal();
+    render();
+  }
+}
+
+/* ------------------------------------------------------------------ helpers */
+function dayByDate(d) {
+  if (!S.cal) return null;
+  return (S.cal.days || []).find(x => x.date === d) || null;
+}
+function allWorkouts() {
+  if (!S.cal) return [];
+  return (S.cal.days || []).reduce((a, d) => a.concat(d.workouts || []), []);
+}
+function allProposals() {
+  if (!S.cal) return [];
+  return (S.cal.days || []).reduce((a, d) => a.concat(d.proposals || []), []);
+}
+function approvedCount() {
+  return allWorkouts().filter(w => w.push_approved && w.status !== "skipped").length;
+}
+function findWorkout(uid) {
+  return allWorkouts().find(w => w.uid === uid) || null;
+}
+const isDemo = () => !!(S.status && S.status.demo) || !!(S.cal && S.cal.demo);
+const canPush = () => !!(S.status && S.status.capabilities && S.status.capabilities.can_push_to_garmin);
+
+function toast(msg, kind, action) {
+  S.toast = { msg, kind, action, id: Date.now() };
+  render();
+  const id = S.toast.id;
+  setTimeout(() => { if (S.toast && S.toast.id === id) { S.toast = null; render(); } }, 8000);
+}
+function announce(msg) { $("#live").textContent = msg; }
+
+/* ========================================================================== */
+/*  RENDER                                                                     */
+/* ========================================================================== */
+function render() {
+  document.documentElement.setAttribute("data-theme", S.theme);
+  $("#rangelabel").textContent = rangeLabel();
+  $("#v-week").setAttribute("aria-pressed", String(S.view === "week"));
+  $("#v-month").setAttribute("aria-pressed", String(S.view === "month"));
+  renderFeedPill();
+  renderContextRow();
+  renderBanners();
+  renderGrid();
+  renderRail();
+  renderChangeBar();
+  renderOverlays();
+  const n = approvedCount();
+  const pb = $("#pushbtn");
+  pb.textContent = n ? "Push " + n + " to Garmin" : "Push to Garmin";
+  pb.disabled = !n || !S.cal;
+  pb.title = !n ? "Approve at least one workout for push first (card menu → Approve for push)."
+    : (canPush() ? "" : "Garmin isn't configured — you can still preview what would be sent.");
+}
+
+function renderFeedPill() {
+  const pill = $("#feedpill"), t = $("#feedtext");
+  pill.className = "pill";
+  const src = S.status && S.status.sources && S.status.sources.trainingpeaks_ics;
+  if (S.fetching) { t.textContent = "refreshing…"; return; }
+  if (S.error) { pill.classList.add("bad"); t.textContent = "offline"; return; }
+  if (!src) { t.textContent = "—"; return; }
+  if (!src.configured) { pill.classList.add("warn"); t.textContent = "feed not set up"; return; }
+  if (!src.ok) { pill.classList.add("bad"); t.textContent = "feed error"; return; }
+  if (src.stale) pill.classList.add("warn");
+  t.textContent = "feed " + ago(src.last_success);
+}
+
+function renderContextRow() {
+  const row = $("#contextrow");
+  row.textContent = "";
+  if (!S.cal) return;
+
+  const ws = allWorkouts();
+  const tss = ws.reduce((a, w) => a + (typeof w.planned_tss === "number" ? w.planned_tss : 0), 0);
+  const unsized = ws.filter(w => w.planned_tss == null).length;
+  const conflicts = ws.filter(w => realConflicts(w).length).length;
+  const pending = allProposals().filter(p => p.status === "pending").length;
+
+  const add = (node) => row.appendChild(node);
+  const item = (label, value, cls) => {
+    const s = el("span", "ctx-item" + (cls ? " " + cls : ""));
+    if (value != null) { const b = el("b", null, value); s.appendChild(b); }
+    s.appendChild(document.createTextNode(label));
+    return s;
+  };
+
+  add(item(S.view === "week" ? " sessions this week" : " sessions this month", String(ws.length)));
+  add(el("span", "ctx-sep"));
+  add(item(unsized ? " TSS planned (" + unsized + " unsized)" : " TSS planned", Math.round(tss)));
+
+  if (conflicts) {
+    add(el("span", "ctx-sep"));
+    const c = el("span", "ctx-item ctx-warn");
+    c.appendChild(svg("g-warn", "glyph"));
+    c.appendChild(document.createTextNode(conflicts + (conflicts === 1 ? " conflict" : " conflicts")));
+    add(c);
+  }
+  if (pending) {
+    add(el("span", "ctx-sep"));
+    const p = el("span", "ctx-item");
+    p.style.color = "var(--accent)";
+    p.appendChild(svg("g-spark", "glyph"));
+    p.appendChild(document.createTextNode(pending + " suggested " + (pending === 1 ? "change" : "changes")));
+    add(p);
+  }
+
+  add(el("span", "spacer"));
+
+  if (isDemo()) {
+    const d = el("span", "pill demo");
+    d.appendChild(document.createTextNode("Demo data"));
+    d.title = "Sample plan and sample Garmin signal. Nothing is ever sent to Garmin in demo mode.";
+    add(d);
+  }
+  const ask = el("button", "btn sm", "Ask Alfred");
+  ask.title = "Look at this week and suggest changes";
+  ask.onclick = () => requestProposals("manual");
+  add(ask);
+
+  const tv = el("button", "btn sm", S.table ? "Calendar" : "Table view");
+  tv.title = "Every value on screen, as a table (keyboard: T)";
+  tv.onclick = () => { S.table = !S.table; render(); };
+  add(tv);
+}
+
+function renderBanners() {
+  const box = $("#banners");
+  box.textContent = "";
+
+  const banner = (kind, glyph, title, body, actions) => {
+    const b = el("div", "banner " + (kind || ""));
+    b.appendChild(svg(glyph, null));
+    const c = el("div");
+    if (title) c.appendChild(el("span", "bt", title));
+    if (body) {
+      const p = el("span");
+      p.innerHTML = body;
+      c.appendChild(p);
+    }
+    b.appendChild(c);
+    if (actions && actions.length) {
+      const a = el("div", "ba");
+      actions.forEach(x => a.appendChild(x));
+      b.appendChild(a);
+    }
+    box.appendChild(b);
+    return b;
+  };
+
+  if (S.error) {
+    const retry = el("button", "btn sm", "Retry");
+    retry.onclick = () => loadAll(true);
+    banner("bad", "g-warn", "Couldn't reach the server",
+      escapeHtml(S.error.message) + (S.cal ? " Showing the last plan you loaded." : ""), [retry]);
+  }
+
+  const src = S.status && S.status.sources;
+  if (src && !src.trainingpeaks_ics.configured) {
+    banner("warn", "g-info", "TrainingPeaks feed isn't connected",
+      "Add your personal calendar-feed URL as <code>TRAININGPEAKS_CALENDAR_FEED_URL</code> in "
+      + "<code>training-sync/.env</code>, then hit refresh. "
+      + "To look around first, restart the server with <code>--demo</code>.");
+  }
+  if (src && src.garmin && !src.garmin.configured) {
+    banner("warn", "g-info", "Garmin isn't connected",
+      "You can plan and move sessions, but nothing can be sent to your Edge 520 until "
+      + "<code>GARMIN_EMAIL</code> and <code>GARMIN_PASSWORD</code> are in <code>training-sync/.env</code>.");
+  } else if (src && src.garmin && src.garmin.configured && !src.garmin.ok) {
+    banner("bad", "g-warn", "Can't reach Garmin", escapeHtml(src.garmin.message || "Login failed."));
+  }
+
+  // The richer "isn't connected" banners above already cover these codes —
+  // echoing the backend's version too just says the same thing twice.
+  const covered = new Set(["ics_not_configured", "garmin_not_configured"]);
+  ((S.cal && S.cal.warnings) || []).forEach(w => {
+    if (covered.has(w.code)) return;
+    banner("warn", "g-warn", null, escapeHtml(w.message || ""));
+  });
+
+  const orphans = (S.cal && S.cal.orphans) || [];
+  if (orphans.length) {
+    banner("warn", "g-info", orphans.length + " workout" + (orphans.length > 1 ? "s" : "") + " removed in TrainingPeaks",
+      "Your changes to " + orphans.map(o => "<b>" + escapeHtml(o.title) + "</b>").join(", ")
+      + " are kept — the coach's plan no longer has them.");
+  }
+}
+
+function escapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/* ------------------------------------------------------------------- grid */
+function renderGrid() {
+  const g = $("#grid");
+  g.textContent = "";
+
+  if (!S.cal) {
+    if (!S.error) {
+      const e = el("div", "emptystate");
+      e.appendChild(el("h2", null, "Loading your plan…"));
+      g.appendChild(e);
+    }
+    return;
+  }
+  if (S.table) { g.appendChild(tableView()); return; }
+  g.appendChild(S.view === "week" ? weekGrid() : monthGrid());
+}
+
+function weekGrid() {
+  const wrap = el("div", "weekgrid");
+  const today = todayISO();
+  for (let i = 0; i < 7; i++) {
+    const date = addDays(S.anchor, i);
+    wrap.appendChild(dayColumn(date, date === today));
+  }
+  return wrap;
+}
+
+function dayColumn(date, isToday) {
+  const day = dayByDate(date) || { date, availability: { state: "available" }, workouts: [], proposals: [], load: {} };
+  const unavailable = day.availability && day.availability.state === "unavailable";
+  const limited = day.availability && day.availability.state === "limited";
+
+  const col = el("div", "daycol" + (unavailable ? " unavailable" : "") + (isToday ? " today" : ""));
+  col.dataset.date = date;
+
+  /* --- header: click toggles availability. This is the core scenario —
+         "I can't bike Tuesday because I have work but I can Wednesday". --- */
+  const head = el("button", "dayhead");
+  head.type = "button";
+  head.setAttribute("aria-pressed", String(!!unavailable));
+  head.title = unavailable
+    ? "Marked unavailable — click to free the day up"
+    : "Click to mark " + longDay(date) + " unavailable";
+
+  const nameRow = el("div", "dayname");
+  nameRow.appendChild(document.createTextNode(shortDay(date)));
+  nameRow.appendChild(el("b", null, String(dayNum(date))));
+  if (isToday) {
+    const t = el("span", "chip", "Today");
+    t.style.marginLeft = "auto";
+    nameRow.appendChild(t);
+  }
+  head.appendChild(nameRow);
+
+  const foot = el("div", "dayfoot");
+  const tss = day.load && day.load.planned_tss;
+  if (tss) foot.appendChild(el("span", "daytss", Math.round(tss) + " TSS"));
+
+  if (unavailable || limited) {
+    const gl = el("span", "availglyph");
+    gl.appendChild(svg("g-lock", null));
+    gl.appendChild(document.createTextNode(
+      limited ? ("≤" + (day.availability.max_minutes || "?") + "m")
+        : (day.availability.note || "Unavailable")));
+    foot.appendChild(gl);
+  }
+
+  const conflicts = new Set();
+  (day.workouts || []).forEach(w => realConflicts(w).forEach(c => conflicts.add(c)));
+  conflicts.delete("day_unavailable");             // the hatch already says this
+  if (conflicts.size) {
+    const cb = el("span", "conflictbadge");
+    cb.appendChild(svg("g-warn", null));
+    cb.appendChild(document.createTextNode(
+      Array.from(conflicts).map(c => CONFLICT_TEXT[c]).join(" · ")));
+    foot.appendChild(cb);
+  }
+  if (foot.childNodes.length) head.appendChild(foot);
+
+  head.onclick = (ev) => { ev.stopPropagation(); toggleAvailability(date, head); };
+  col.appendChild(head);
+
+  /* --- drop zone --- */
+  const zone = el("div", "dropzone");
+  zone.dataset.date = date;
+
+  zone.addEventListener("dragover", ev => {
+    if (!S.dragUid) return;
+    ev.preventDefault();
+    // Deliberately NOT dropEffect="none" on an unavailable day: that makes the
+    // browser swallow the drop event, so the user drags, nothing happens, and
+    // nothing explains why. The day is styled as blocked, the drop still lands,
+    // and the move is refused with a reason and an "anyway" escape hatch.
+    ev.dataTransfer.dropEffect = "move";
+    zone.classList.add(unavailable ? "blocked" : "over");
+  });
+  zone.addEventListener("dragleave", () => zone.classList.remove("over", "blocked"));
+  zone.addEventListener("drop", ev => {
+    ev.preventDefault();
+    zone.classList.remove("over", "blocked");
+    const uid = ev.dataTransfer.getData("text/plain") || S.dragUid;
+    if (!uid) return;
+    if (unavailable) {
+      const card = document.querySelector('[data-uid="' + cssEscape(uid) + '"]');
+      if (card) { card.classList.add("shake"); setTimeout(() => card.classList.remove("shake"), 200); }
+    }
+    moveWorkout(uid, date);
+  });
+
+  (day.workouts || []).forEach(w => zone.appendChild(workoutCard(w, day)));
+
+  // Ghost stubs: a workout that lives elsewhere but was planned here.
+  allWorkouts().forEach(w => {
+    if (w.plan_date === date && w.date !== date) {
+      const g = el("div", "ghost");
+      g.appendChild(svg("g-right", "glyph"));
+      g.appendChild(document.createTextNode(w.title + " → " + shortDay(w.date)));
+      zone.appendChild(g);
+    }
+  });
+
+  (day.proposals || []).filter(p => p.status === "pending")
+    .forEach(p => zone.appendChild(proposalCard(p)));
+
+  if (!zone.childNodes.length) {
+    zone.appendChild(el("div", "emptyday", unavailable ? "Blocked out" : "Rest"));
+  }
+  col.appendChild(zone);
+  return col;
+}
+
+/* ------------------------------------------------------------ workout card */
+function workoutCard(w, day) {
+  const int = intensityOf(w);
+  const card = el("article", "card");
+  card.style.setProperty("--intensity", RAMP[int.step]);
+  if (int.step === "unknown") card.classList.add("unknown-int");
+  if (w.is_moved) card.classList.add("moved");
+  if (w.push_approved) card.classList.add("approved");
+  if (S.carry === w.uid) card.classList.add("carried");
+  card.dataset.uid = w.uid;
+  card.tabIndex = 0;
+
+  /* HTML5 drag. Touch devices don't fire these — the card menu's "Move to…"
+     and the keyboard path (Space to pick up) are the equivalents there. */
+  card.draggable = true;
+  card.addEventListener("dragstart", ev => {
+    S.dragUid = w.uid;
+    ev.dataTransfer.setData("text/plain", w.uid);
+    ev.dataTransfer.effectAllowed = "move";
+    card.classList.add("dragging");
+  });
+  card.addEventListener("dragend", () => {
+    S.dragUid = null;
+    card.classList.remove("dragging");
+    document.querySelectorAll(".dropzone").forEach(z => z.classList.remove("over", "blocked"));
+  });
+
+  const body = el("div", "card-body");
+  body.appendChild(el("div", "card-bar"));
+  const main = el("div", "card-main");
+
+  const menu = el("button", "card-menu", "⋮");
+  menu.setAttribute("aria-label", "Actions for " + w.title);
+  menu.onclick = ev => { ev.stopPropagation(); openCardMenu(w, menu); };
+  main.appendChild(menu);
+
+  const top = el("div", "card-top");
+  top.appendChild(el("h4", "card-title", w.title));
+  main.appendChild(top);
+
+  const meta = el("div", "card-meta");
+  meta.appendChild(svg(glyphOf(w), "glyph"));
+  const dur = fmtDur(w.duration_s);
+  if (dur) {
+    const c = w.classification || {};
+    const approx = c.duration_source && c.duration_source !== "explicit";
+    const d = el("span", "num", (approx ? "~" : "") + dur);
+    if (approx) d.title = "Typical length for this kind of session — the feed didn't give one.";
+    meta.appendChild(d);
+  }
+  const t = tssOf(w);
+  if (t) {
+    const ts = el("span", "num tss" + (t.low ? " low" : ""), t.text);
+    if (t.hint) ts.title = t.hint;
+    meta.appendChild(ts);
+  }
+  main.appendChild(meta);
+
+  const iw = el("div", "intwrap");
+  const meter = el("div", "meter");
+  meter.setAttribute("role", "img");
+  meter.setAttribute("aria-label", "Intensity: " + int.word);
+  for (let i = 0; i < 4; i++) meter.appendChild(el("i", i < int.segs ? "on" : null));
+  iw.appendChild(meter);
+  iw.appendChild(el("span", "intword", int.word));
+  main.appendChild(iw);
+
+  if (w.is_moved) {
+    const actor = w.override && w.override.kind === "alfred" ? "Alfred" : "you";
+    const p = el("div", "card-prov");
+    p.appendChild(document.createTextNode("⤷ moved from " + shortDay(w.plan_date) + " · " + actor));
+    main.appendChild(p);
+  }
+  if (w.override && w.override.note) main.appendChild(el("div", "card-note", "“" + w.override.note + "”"));
+  if (w.status === "skipped") {
+    const s = el("div", "card-prov");
+    s.appendChild(el("span", "chip", "Skipped"));
+    main.appendChild(s);
+  }
+  if (w.plan_snapshot_changed) {
+    const s = el("div", "card-prov");
+    const c = el("span", "chip warn", "⚠ Coach changed this");
+    c.title = "Your coach edited this workout after you moved it. Your date is kept.";
+    s.appendChild(c);
+    main.appendChild(s);
+  }
+  if (w.is_orphaned) {
+    const s = el("div", "card-prov");
+    s.appendChild(el("span", "chip warn", "Removed in TrainingPeaks"));
+    main.appendChild(s);
+  }
+
+  body.appendChild(main);
+  card.appendChild(body);
+
+  // A pending proposal about this workout — flagged here, decided on the
+  // dashed card sitting on its target day.
+  const prop = allProposals().find(p => p.uid === w.uid && p.status === "pending");
+  if (prop && prop.to_date && prop.to_date !== w.date) {
+    const strip = el("div", "suggest-strip");
+    strip.appendChild(svg("g-spark", "glyph"));
+    strip.appendChild(document.createTextNode("Alfred suggests → " + shortDay(prop.to_date)));
+    card.appendChild(strip);
+  }
+
+  const push = pushInfo(w);
+  if (push) {
+    const ps = el("div", "card-push " + push.cls);
+    ps.appendChild(document.createTextNode(push.text));
+    if (push.retry) {
+      const r = el("button", "rt", "Retry");
+      r.style.textDecoration = "underline";
+      r.onclick = ev => { ev.stopPropagation(); openPushDrawer([w.uid]); };
+      ps.appendChild(r);
+    }
+    card.appendChild(ps);
+  }
+
+  card.addEventListener("focus", () => { S.focusDate = w.date; });
+  return card;
+}
+
+/* Push outcome is its OWN region (bottom strip) with its own palette, never
+   the border — the border belongs to provenance. */
+function pushInfo(w) {
+  const live = S.pushJob && (S.pushJob.items || []).find(i => i.uid === w.uid);
+  if (live && S.pushJob.state === "running") {
+    if (live.state === "pending") return { cls: "", text: "↻ Pushing…" };
+  }
+  if (live && live.state === "failed") {
+    return { cls: "bad", text: "✕ Push failed — " + (live.error && live.error.message ? live.error.message : "Garmin rejected it"), retry: true };
+  }
+  const g = w.garmin || {};
+  if (g.push_state === "scheduled") return { cls: "good", text: "✓ On Garmin · not yet synced to Edge" };
+  if (g.push_state === "drifted") return { cls: "warn", text: "⚠ Changed since it was pushed" };
+  if (g.push_state === "failed") return { cls: "bad", text: "✕ Push failed", retry: true };
+  if (w.push_approved) return { cls: "", text: "↑ Approved for push" };
+  return null;
+}
+
+/* ----------------------------------------------------------- proposal card */
+function proposalCard(p) {
+  const card = el("article", "card proposal");
+  if (S.selectedProposal === p.proposal_id) card.classList.add("selected");
+  card.tabIndex = 0;
+  card.dataset.proposal = p.proposal_id;
+  card.style.setProperty("--intensity", "var(--accent)");
+
+  const body = el("div", "card-body");
+  body.appendChild(el("div", "card-bar"));
+  const main = el("div", "card-main");
+
+  // No inline glyph in the title row -- it competes with the title for a ~96px
+  // column and forces mid-word breaks. The ✦ chip below carries the identity.
+  const top = el("div", "card-top");
+  top.appendChild(el("h4", "card-title", p.title || "Suggested change"));
+  main.appendChild(top);
+
+  const meta = el("div", "card-meta");
+  meta.appendChild(el("span", "chip accent", "✦ " + (p.kind || "move").toUpperCase()));
+  if (p.from_date && p.to_date) {
+    meta.appendChild(el("span", null, shortDay(p.from_date) + " → " + shortDay(p.to_date)));
+  }
+  if (p.conflicts_with_override) {
+    const c = el("span", "chip warn", "You edited this");
+    c.title = "You've already moved this by hand. Approving replaces your change.";
+    meta.appendChild(c);
+  }
+  main.appendChild(meta);
+
+  // The reason, in his language. Mandatory and always rendered.
+  main.appendChild(el("div", "prop-reason", p.rationale || "No reason given."));
+  if (p.tradeoff) main.appendChild(el("div", "card-note", p.tradeoff));
+  if (p.blocked_pending_input && p.question) {
+    main.appendChild(el("div", "prop-q", "Needs an answer first — " + p.question));
+  }
+
+  const acts = el("div", "prop-actions");
+  const ok = el("button", "btn sm accent", "✓ Approve");
+  ok.disabled = !!p.blocked_pending_input;
+  if (p.blocked_pending_input) ok.title = "Answer the question above first.";
+  ok.onclick = ev => { ev.stopPropagation(); approveProposal(p); };
+  const no = el("button", "btn sm", "✕ Reject");
+  no.onclick = ev => { ev.stopPropagation(); rejectProposal(p); };
+  const why = el("button", "btn sm", "Why?");
+  why.onclick = ev => { ev.stopPropagation(); S.selectedProposal = p.proposal_id; S.railOpen = true; render(); };
+  acts.appendChild(ok); acts.appendChild(no); acts.appendChild(why);
+  main.appendChild(acts);
+
+  body.appendChild(main);
+  card.appendChild(body);
+  card.onclick = () => { S.selectedProposal = p.proposal_id; render(); };
+  return card;
+}
+
+/* -------------------------------------------------------------- month view */
+function monthGrid() {
+  const wrap = el("div");
+  const head = el("div", "monthgrid");
+  DAYNAMES.forEach(d => head.appendChild(el("div", "monthdow", d)));
+  wrap.appendChild(head);
+
+  const grid = el("div", "monthgrid");
+  const r = monthGridRange();
+  const month = parseISO(S.anchor).getMonth();
+  const today = todayISO();
+  let d = r.start;
+  while (d <= r.end) {
+    grid.appendChild(monthCell(d, parseISO(d).getMonth() === month, d === today));
+    d = addDays(d, 1);
+  }
+  wrap.appendChild(grid);
+
+  const note = el("p", "tile-sub");
+  note.style.marginTop = "14px";
+  note.textContent = "Month view is for the overview and for blocking out work days — "
+    + "dragging is week view only, where the targets are big enough to hit reliably.";
+  wrap.appendChild(note);
+  return wrap;
+}
+
+function monthCell(date, inMonth, isToday) {
+  const day = dayByDate(date);
+  const unavailable = day && day.availability && day.availability.state === "unavailable";
+  const cell = el("button", "mcell" + (inMonth ? "" : " out") + (isToday ? " today" : "")
+    + (unavailable ? " unavailable" : ""));
+  cell.type = "button";
+  cell.title = unavailable ? "Marked unavailable — click to free it up"
+    : "Click to mark " + longDay(date) + " " + dayNum(date) + " unavailable";
+
+  const d = el("div", "mdate");
+  d.appendChild(document.createTextNode(String(dayNum(date))));
+  if (unavailable) d.appendChild(svg("g-lock", "lock"));
+  cell.appendChild(d);
+
+  ((day && day.workouts) || []).slice(0, 3).forEach(w => {
+    const int = intensityOf(w);
+    const c = el("div", "mchip");
+    c.style.setProperty("--intensity", RAMP[int.step]);
+    c.appendChild(el("i", "idot"));
+    c.appendChild(svg(glyphOf(w), null));
+    const dur = fmtDur(w.duration_s);
+    c.appendChild(el("span", "mt", dur || w.title));
+    c.title = w.title + " · " + int.word + (dur ? " · " + dur : "");
+    cell.appendChild(c);
+  });
+  const extra = ((day && day.workouts) || []).length - 3;
+  if (extra > 0) cell.appendChild(el("div", "loadlab", "+" + extra + " more"));
+  if (day && (day.proposals || []).some(p => p.status === "pending")) {
+    const c = el("div", "mchip");
+    c.style.background = "var(--accent-wash)";
+    c.style.color = "var(--accent)";
+    c.appendChild(svg("g-spark", null));
+    c.appendChild(el("span", "mt", "suggested"));
+    cell.appendChild(c);
+  }
+
+  cell.onclick = () => toggleAvailability(date, cell);
+  return cell;
+}
+
+/* -------------------------------------------------------------- table view */
+function tableView() {
+  const wrap = el("div", "tablewrap");
+  const t = el("table");
+  const thead = el("thead");
+  const hr = el("tr");
+  ["Date", "Workout", "Sport", "Duration", "TSS", "Intensity", "State", "Push"]
+    .forEach(h => hr.appendChild(el("th", null, h)));
+  thead.appendChild(hr);
+  t.appendChild(thead);
+
+  const tb = el("tbody");
+  const rows = allWorkouts().slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  if (!rows.length) {
+    const tr = el("tr");
+    const td = el("td", "wrap", "Nothing planned in this range.");
+    td.colSpan = 8;
+    tr.appendChild(td); tb.appendChild(tr);
+  }
+  rows.forEach(w => {
+    const int = intensityOf(w);
+    const day = dayByDate(w.date);
+    const un = day && day.availability && day.availability.state === "unavailable";
+    const tr = el("tr");
+    tr.appendChild(el("td", null, shortDay(w.date) + " " + dayNum(w.date) + (un ? " (unavailable)" : "")));
+    tr.appendChild(el("td", "wrap", w.title));
+    tr.appendChild(el("td", null, w.sport || "—"));
+    tr.appendChild(el("td", null, fmtDur(w.duration_s) || "—"));
+    const t2 = tssOf(w);
+    tr.appendChild(el("td", null, t2 ? t2.text : "—"));
+    tr.appendChild(el("td", null, int.word));
+    tr.appendChild(el("td", null, w.is_moved ? ("moved from " + shortDay(w.plan_date)) : (w.status || "planned")));
+    const p = pushInfo(w);
+    tr.appendChild(el("td", "wrap", p ? p.text.replace(/^[^A-Za-z]+/, "") : "not queued"));
+    tb.appendChild(tr);
+  });
+  t.appendChild(tb);
+  wrap.appendChild(t);
+  return wrap;
+}
+
+/* ================================================================== rail */
+function renderRail() {
+  const rail = $("#rail");
+  rail.textContent = "";
+  const wide = window.matchMedia("(min-width:1281px)").matches;
+  rail.hidden = !wide && !S.railOpen;
+  if (rail.hidden) return;
+
+  if (!wide) {
+    const close = el("button", "btn sm", "✕ Close");
+    close.onclick = () => { S.railOpen = false; render(); };
+    rail.appendChild(close);
+  }
+
+  const days = (S.signal && S.signal.days) || [];
+  const today = todayISO();
+
+  /* --- readiness: one number -> a stat tile, not a chart --- */
+  let readiness = null, readyDate = null;
+  for (let i = days.length - 1; i >= 0; i--) {
+    const r = days[i].garmin && days[i].garmin.readiness;
+    if (r && typeof r.score === "number") { readiness = r; readyDate = days[i].date; break; }
+  }
+  const rt = el("section", "tile");
+  rt.appendChild(el("div", "tile-h", "Training readiness"));
+  if (readiness) {
+    const row = el("div", "hero-row");
+    row.appendChild(el("div", "hero", String(readiness.score)));
+    const lvl = readinessWord(readiness.score, readiness.level);
+    row.appendChild(el("div", "hero-word", lvl.word));
+    rt.appendChild(row);
+    const m = el("div", "readymeter " + lvl.cls);
+    const fill = el("span");
+    fill.style.width = Math.max(2, Math.min(100, readiness.score)) + "%";
+    m.appendChild(fill);
+    rt.appendChild(m);
+    if (readiness.feedback) rt.appendChild(el("div", "tile-sub", readiness.feedback));
+    if (readyDate && readyDate !== today) {
+      rt.appendChild(el("div", "tile-sub", "From " + shortDay(readyDate) + " — no reading yet today."));
+    }
+  } else {
+    rt.appendChild(el("div", "tile-sub",
+      (S.status && S.status.sources && S.status.sources.garmin && !S.status.sources.garmin.configured)
+        ? "Connect Garmin to see readiness here."
+        : "No readiness reading in the last 7 days."));
+  }
+  rail.appendChild(rt);
+
+  /* --- training status chip: text + glyph, not a gauge --- */
+  const ts = (S.signal && S.signal.training_status) || (S.cal && S.cal.training_status);
+  if (ts) {
+    const c = el("section", "tile");
+    c.appendChild(el("div", "tile-h", "Training status"));
+    const chip = el("span", "statuschip");
+    chip.appendChild(svg("g-info", null));
+    chip.appendChild(document.createTextNode(titleCase(ts)));
+    c.appendChild(chip);
+    rail.appendChild(c);
+  }
+
+  /* --- 7-day load: single series, one color for every bar, no legend --- */
+  const lt = el("section", "tile");
+  const actualKnown = days.some(d => d.load && d.load.actual_tss);
+  lt.appendChild(el("div", "tile-h", actualKnown ? "Training load · last 7 days" : "Planned load · last 7 days"));
+  const chart = el("div", "loadchart");
+  const vals = days.map(d => ({
+    date: d.date,
+    v: (actualKnown ? (d.load && d.load.actual_tss) : (d.load && d.load.planned_tss)) || 0
+  }));
+  const max = Math.max(1, ...vals.map(x => x.v));
+  if (!vals.length) {
+    lt.appendChild(el("div", "tile-sub", "No load data yet."));
+  } else {
+    // Selective direct labels -- the peak and today, never a number on every bar.
+    const peak = vals.reduce((a, x) => (x.v > a.v ? x : a), vals[0]);
+    vals.forEach(x => {
+      const col = el("div", "loadcol");
+      const label = x.v && (x.date === today || x.date === peak.date) ? String(Math.round(x.v)) : "";
+      col.appendChild(el("div", "loadval", label));
+      const track = el("div", "loadbar-track");
+      const bar = el("div", "loadbar" + (x.date === today ? " is-today" : "") + (x.v ? "" : " zero"));
+      bar.style.height = x.v ? Math.max(4, (x.v / max) * 100) + "%" : "3px";
+      bar.title = shortDay(x.date) + " " + dayNum(x.date) + " · " + Math.round(x.v) + " TSS";
+      track.appendChild(bar);
+      col.appendChild(track);
+      col.appendChild(el("div", "loadlab", shortDay(x.date)[0]));
+      chart.appendChild(col);
+    });
+    lt.appendChild(chart);
+  }
+  rail.appendChild(lt);
+
+  /* --- rationale panel for the selected proposal --- */
+  const sel = allProposals().find(p => p.proposal_id === S.selectedProposal);
+  if (sel) rail.appendChild(rationalePanel(sel));
+
+  /* --- recent activities --- */
+  const acts = [];
+  days.slice().reverse().forEach(d => ((d.garmin && d.garmin.activities) || [])
+    .forEach(a => acts.push(Object.assign({ date: d.date }, a))));
+  const at = el("section", "tile");
+  at.appendChild(el("div", "tile-h", "Recent activities"));
+  if (!acts.length) {
+    at.appendChild(el("div", "tile-sub", "Nothing recorded in the last 7 days."));
+  } else {
+    const list = el("div", "acts");
+    acts.slice(0, 5).forEach(a => {
+      const row = el("div", "act");
+      row.appendChild(svg(SPORT_GLYPH[a.sport] || "g-dot", null));
+      const c = el("div");
+      c.appendChild(el("div", "act-n", a.name || "Activity"));
+      const bits = [shortDay(a.date)];
+      if (a.duration_s) bits.push(fmtDur(a.duration_s));
+      if (a.distance_m) bits.push((a.distance_m / 1000).toFixed(1) + " km");
+      if (a.tss) bits.push(Math.round(a.tss) + " load");
+      c.appendChild(el("div", "act-m", bits.join(" · ")));
+      row.appendChild(c);
+      list.appendChild(row);
+    });
+    at.appendChild(list);
+  }
+  rail.appendChild(at);
+}
+
+function readinessWord(score, level) {
+  if (score >= 75) return { word: level ? titleCase(level) : "Prime", cls: "" };
+  if (score >= 50) return { word: level ? titleCase(level) : "Moderate", cls: "" };
+  if (score >= 25) return { word: "Low", cls: "warn" };
+  return { word: "Poor", cls: "bad" };
+}
+function titleCase(s) {
+  return String(s).toLowerCase().replace(/(^|[\s_-])(\w)/g, (m, a, b) => (a === "_" || a === "-" ? " " : a) + b.toUpperCase());
+}
+
+function rationalePanel(p) {
+  const box = el("section", "rationale");
+  box.appendChild(el("div", "tile-h", "Why this move?"));
+  box.appendChild(el("div", "tile-sub", p.rationale || ""));
+
+  (p.rationale_details || []).forEach(d => {
+    const s = el("div", "tile-sub");
+    s.textContent = "• " + d;
+    box.appendChild(s);
+  });
+
+  const ev = el("div", "evidence");
+  const push = (k, v) => {
+    const r = el("div", "ev");
+    r.appendChild(el("span", null, k));
+    r.appendChild(el("span", null, String(v)));
+    ev.appendChild(r);
+  };
+  if (p.from_date) push("From", shortDay(p.from_date) + " " + dayNum(p.from_date));
+  if (p.to_date) push("To", shortDay(p.to_date) + " " + dayNum(p.to_date));
+  if (typeof p.confidence === "number") push("Confidence", Math.round(p.confidence * 100) + "%");
+  (p.signals_used || []).forEach(s => {
+    const bits = String(s).split("=");
+    push(bits[0], bits.slice(1).join("=") || "—");
+  });
+  if (ev.childNodes.length) box.appendChild(ev);
+
+  if (p.tradeoff) {
+    const t = el("div", "tile-sub");
+    t.style.fontStyle = "italic";
+    t.textContent = "Trade-off: " + p.tradeoff;
+    box.appendChild(t);
+  }
+  if ((p.alternatives || []).length) {
+    box.appendChild(el("div", "tile-h", "Days I ruled out"));
+    const ul = el("ul", "altlist");
+    p.alternatives.slice(0, 4).forEach(a => {
+      ul.appendChild(el("li", null, shortDay(a.date) + " — " + a.reason));
+    });
+    box.appendChild(ul);
+  }
+  return box;
+}
+
+/* =========================================================== change bar */
+function renderChangeBar() {
+  const bar = $("#changebar");
+  bar.textContent = "";
+  const pending = allProposals().filter(p => p.status === "pending");
+  if (!pending.length) return;
+
+  const b = el("div", "changebar");
+  b.appendChild(el("span", "dot"));
+  const label = el("span");
+  label.appendChild(el("b", null, String(pending.length)));
+  label.appendChild(document.createTextNode(
+    pending.length === 1 ? " suggested change" : " suggested changes"));
+  b.appendChild(label);
+  b.appendChild(el("span", "spacer"));
+
+  const review = el("button", "btn sm", "Review");
+  review.onclick = () => {
+    S.selectedProposal = pending[0].proposal_id;
+    S.railOpen = true;
+    render();
+    const c = document.querySelector('[data-proposal="' + cssEscape(pending[0].proposal_id) + '"]');
+    if (c) { c.scrollIntoView({ block: "center", behavior: "smooth" }); c.focus(); }
+  };
+  const all = el("button", "btn sm accent", "Approve all");
+  all.onclick = async () => {
+    for (const p of pending) {
+      if (p.blocked_pending_input) continue;
+      await approveProposal(p, true);
+    }
+    await loadAll();
+    toast("Approved " + pending.length + " changes. Nothing has gone to Garmin yet.");
+  };
+  const none = el("button", "btn sm", "Discard all");
+  none.onclick = async () => {
+    for (const p of pending) await rejectProposal(p, true);
+    await loadAll();
+    toast("Discarded all suggestions.");
+  };
+  b.appendChild(review); b.appendChild(all); b.appendChild(none);
+  bar.appendChild(b);
+}
+function cssEscape(s) { return String(s).replace(/["\\]/g, "\\$&"); }
+
+/* ============================================================== overlays */
+function renderOverlays() {
+  const box = $("#overlays");
+  box.textContent = "";
+
+  if (S.drawer === "push") box.appendChild(pushDrawer());
+  if (S.drawer === "help") box.appendChild(helpDrawer());
+
+  if (S.toast) {
+    const t = el("div", "toast" + (S.toast.kind === "bad" ? " bad" : ""));
+    t.appendChild(el("span", null, S.toast.msg));
+    if (S.toast.action) {
+      const a = el("button", null, S.toast.action.label);
+      a.onclick = () => { const f = S.toast.action.fn; S.toast = null; render(); f(); };
+      t.appendChild(a);
+    }
+    box.appendChild(t);
+  }
+}
+
+/* ------------------------------------------------------- availability flow */
+function toggleAvailability(date, anchor) {
+  const day = dayByDate(date);
+  const cur = (day && day.availability && day.availability.state) || "available";
+  if (cur === "available") openAvailabilityPopover(date, anchor);
+  else setAvailability(date, "available");
+}
+
+function openAvailabilityPopover(date, anchor) {
+  closePopover();
+  const back = el("div", "backdrop");
+  back.onclick = closePopover;
+  const pop = el("div", "popover");
+  pop.setAttribute("role", "dialog");
+  pop.setAttribute("aria-label", "Availability for " + longDay(date));
+
+  pop.appendChild(el("h4", null, "Blocking out " + longDay(date) + " " + dayNum(date)));
+
+  let reason = "work";
+  pop.appendChild(el("div", "pop-lab", "Why?"));
+  const row = el("div", "pop-row");
+  [["work", "Work"], ["travel", "Travel"], ["family", "Family"], ["other", "Other"]].forEach(([k, lab]) => {
+    const b = el("button", null, lab);
+    b.type = "button";
+    b.setAttribute("aria-pressed", String(k === reason));
+    b.onclick = () => {
+      reason = k;
+      Array.from(row.children).forEach(c => c.setAttribute("aria-pressed", String(c === b)));
+    };
+    row.appendChild(b);
+  });
+  pop.appendChild(row);
+
+  // The complaint is a recurring work pattern, so recurrence is offered at the
+  // point of pain. The store is per-date, so this writes the next N weeks.
+  const rec = el("label", "checkrow");
+  const cb = el("input");
+  cb.type = "checkbox";
+  rec.appendChild(cb);
+  rec.appendChild(document.createTextNode("Every " + longDay(date) + " for 8 weeks"));
+  pop.appendChild(rec);
+
+  const askAlfred = el("label", "checkrow");
+  const cb2 = el("input");
+  cb2.type = "checkbox";
+  cb2.checked = true;
+  askAlfred.appendChild(cb2);
+  askAlfred.appendChild(document.createTextNode("Suggest where the session should go"));
+  pop.appendChild(askAlfred);
+
+  const acts = el("div", "pop-row");
+  const go = el("button", "btn sm primary", "Mark unavailable");
+  go.onclick = async () => {
+    closePopover();
+    const dates = [date];
+    if (cb.checked) for (let i = 1; i < 8; i++) dates.push(addDays(date, 7 * i));
+    await setAvailability(dates, "unavailable", reason, cb2.checked);
+  };
+  const limited = el("button", "btn sm", "Only ~1h");
+  limited.onclick = async () => { closePopover(); await setAvailability([date], "limited", reason, cb2.checked, 60); };
+  acts.appendChild(go); acts.appendChild(limited);
+  pop.appendChild(acts);
+
+  document.body.appendChild(back);
+  document.body.appendChild(pop);
+  positionPopover(pop, anchor);
+  pop.querySelector("button").focus();
+  S._popover = [back, pop];
+}
+function positionPopover(pop, anchor) {
+  const r = anchor.getBoundingClientRect();
+  const w = pop.offsetWidth, h = pop.offsetHeight;
+  let left = r.left + window.scrollX;
+  let top = r.bottom + window.scrollY + 6;
+  if (left + w > window.innerWidth - 8) left = Math.max(8, window.innerWidth - w - 8);
+  if (top + h > window.scrollY + window.innerHeight - 8) top = Math.max(8, r.top + window.scrollY - h - 6);
+  pop.style.left = left + "px";
+  pop.style.top = top + "px";
+}
+function closePopover() {
+  if (S._popover) { S._popover.forEach(n => n.remove()); S._popover = null; }
+}
+
+async function setAvailability(dates, state, reason, askAlfred, maxMinutes) {
+  const list = Array.isArray(dates) ? dates : [dates];
+  try {
+    for (const d of list) {
+      if (state === "available") {
+        await api("/api/days/" + d + "/availability", { method: "DELETE" });
+      } else {
+        await api("/api/days/" + d + "/availability", {
+          method: "PUT",
+          body: { state, note: reason ? titleCase(reason) : null, max_minutes: maxMinutes || null }
+        });
+      }
+    }
+    await loadAll();
+    if (state === "available") {
+      announce(longDay(list[0]) + " is available again.");
+      toast(longDay(list[0]) + " is free again.");
+    } else {
+      announce(longDay(list[0]) + " marked unavailable.");
+      // Marking a day off flags the sessions on it — it never moves anything by
+      // itself. Alfred proposes; nothing changes until it is approved.
+      if (askAlfred) await requestProposals("availability_changed");
+      else toast(list.length > 1 ? "Blocked out " + list.length + " " + longDay(list[0]) + "s." : longDay(list[0]) + " blocked out.");
+    }
+  } catch (e) {
+    toast(e.message, "bad");
+  }
+}
+
+/* ----------------------------------------------------------------- moving */
+async function moveWorkout(uid, toDate, allowUnavailable) {
+  const w = findWorkout(uid);
+  if (!w) return;
+  if (w.date === toDate) return;
+  const from = w.date;
+  try {
+    await api("/api/workouts/" + encodeURIComponent(uid) + "/move", {
+      method: "POST",
+      body: { to_date: toDate, expected_rev: w.rev, allow_unavailable: !!allowUnavailable }
+    });
+    await loadAll();
+    announce(w.title + " moved to " + longDay(toDate) + ".");
+    toast("Moved " + w.title + " to " + shortDay(toDate) + ".", null, {
+      label: "Undo",
+      fn: async () => {
+        try {
+          await api("/api/workouts/" + encodeURIComponent(uid) + "/override", { method: "DELETE" });
+          await loadAll();
+          toast("Put " + w.title + " back on " + shortDay(from) + ".");
+        } catch (e) { toast(e.message, "bad"); }
+      }
+    });
+  } catch (e) {
+    if (e.code === "day_unavailable") {
+      const day = dayByDate(toDate);
+      const why = day && day.availability && day.availability.note ? " (" + day.availability.note + ")" : "";
+      toast("You marked " + longDay(toDate) + why + " unavailable — move it there anyway?", "bad",
+        { label: "Move anyway", fn: () => moveWorkout(uid, toDate, true) });
+      return;
+    }
+    if (e.code === "stale_rev") {
+      await loadAll();
+      toast("That workout changed while you were looking at it — try again.", "bad");
+      return;
+    }
+    toast(e.message, "bad");
+  }
+}
+
+/* --------------------------------------------------------------- card menu */
+function openCardMenu(w, anchor) {
+  closePopover();
+  const back = el("div", "backdrop");
+  back.onclick = closePopover;
+  const pop = el("div", "popover");
+  pop.setAttribute("role", "menu");
+  pop.appendChild(el("h4", null, w.title));
+
+  const item = (label, fn, hint) => {
+    const b = el("button", "btn sm", label);
+    b.style.width = "100%";
+    b.style.justifyContent = "flex-start";
+    if (hint) b.title = hint;
+    b.onclick = async () => { closePopover(); await fn(); };
+    pop.appendChild(b);
+    return b;
+  };
+
+  item(w.push_approved ? "✓ Approved for push — undo" : "Approve for push", async () => {
+    try {
+      await api("/api/workouts/" + encodeURIComponent(w.uid), {
+        method: "PATCH", body: { push_approved: !w.push_approved }
+      });
+      await loadAll();
+      toast(w.push_approved ? "Removed from the push queue." : "Queued for Garmin. Hit Push when ready.");
+    } catch (e) { toast(e.message, "bad"); }
+  }, "Approving a change and sending it to your Edge are two separate steps.");
+
+  // Touch has no HTML5 drag, so the menu carries an explicit move.
+  pop.appendChild(el("div", "pop-lab", "Move to"));
+  const days = el("div", "pop-row");
+  for (let i = 0; i < 7; i++) {
+    const d = addDays(S.view === "week" ? S.anchor : mondayOf(w.date), i);
+    const b = el("button", null, shortDay(d));
+    b.type = "button";
+    b.setAttribute("aria-pressed", String(d === w.date));
+    b.style.flex = "0 0 auto";
+    b.style.minWidth = "44px";
+    b.onclick = async () => { closePopover(); await moveWorkout(w.uid, d); };
+    days.appendChild(b);
+  }
+  pop.appendChild(days);
+
+  item(w.status === "skipped" ? "Un-skip" : "Skip this session", async () => {
+    try {
+      await api("/api/workouts/" + encodeURIComponent(w.uid), {
+        method: "PATCH", body: { status: w.status === "skipped" ? null : "skipped" }
+      });
+      await loadAll();
+    } catch (e) { toast(e.message, "bad"); }
+  });
+
+  if (w.override) {
+    item("Revert to the coach's plan", async () => {
+      try {
+        await api("/api/workouts/" + encodeURIComponent(w.uid) + "/override", { method: "DELETE" });
+        await loadAll();
+        toast("Back to the coach's version.");
+      } catch (e) { toast(e.message, "bad"); }
+    });
+  }
+
+  if (w.description) {
+    const d = el("div", "tile-sub");
+    d.style.whiteSpace = "pre-wrap";
+    d.style.maxHeight = "160px";
+    d.style.overflow = "auto";
+    d.textContent = w.description;
+    pop.appendChild(d);
+  }
+
+  document.body.appendChild(back);
+  document.body.appendChild(pop);
+  positionPopover(pop, anchor);
+  pop.querySelector("button").focus();
+  S._popover = [back, pop];
+}
+
+/* -------------------------------------------------------------- proposals */
+async function requestProposals(reason) {
+  const r = viewRange();
+  try {
+    const res = await api("/api/proposals", {
+      method: "POST", body: { start: r.start, end: r.end, reason: reason || "manual" }
+    });
+    await loadAll();
+    const n = (res.proposals || []).length;
+    const unresolved = (res.unresolved || []).length;
+    if (n) {
+      announce(n + " suggestions ready for review.");
+      toast(n === 1 ? "Alfred has a suggestion — approve or reject it below."
+        : "Alfred has " + n + " suggestions — nothing changes until you approve.");
+    } else if (unresolved) {
+      toast("Alfred couldn't find a good slot — see the flagged sessions.", "bad");
+    } else {
+      const w = (res.warnings || [])[0];
+      toast(w ? w.message : "Nothing to suggest — the week looks fine as it is.");
+    }
+  } catch (e) {
+    toast(e.message, "bad");
+  }
+}
+
+async function approveProposal(p, quiet) {
+  try {
+    await api("/api/proposals/" + encodeURIComponent(p.proposal_id) + "/approve",
+      { method: "POST", body: { force: false } });
+    if (!quiet) {
+      await loadAll();
+      announce("Approved.");
+      toast("Approved. It's on your calendar — hit Push when you want it on the Edge.");
+    }
+  } catch (e) {
+    if (e.code === "proposal_conflict") {
+      toast(e.message, "bad", {
+        label: "Use Alfred's version",
+        fn: async () => {
+          try {
+            await api("/api/proposals/" + encodeURIComponent(p.proposal_id) + "/approve",
+              { method: "POST", body: { force: true } });
+            await loadAll();
+            toast("Approved, replacing your edit.");
+          } catch (e2) { toast(e2.message, "bad"); }
+        }
+      });
+      return;
+    }
+    if (!quiet) toast(e.message, "bad");
+  }
+}
+
+async function rejectProposal(p, quiet) {
+  try {
+    await api("/api/proposals/" + encodeURIComponent(p.proposal_id) + "/reject",
+      { method: "POST", body: { reason: "user rejected" } });
+    if (!quiet) { await loadAll(); toast("Dismissed. Alfred won't suggest that again."); }
+  } catch (e) { if (!quiet) toast(e.message, "bad"); }
+}
+
+/* ------------------------------------------------------------------- push */
+async function openPushDrawer(uids) {
+  S.drawer = "push";
+  S.pushPreview = { loading: true };
+  render();
+  const r = viewRange();
+  try {
+    const job = await api("/api/push", {
+      method: "POST",
+      body: {
+        start: r.start, end: r.end, dry_run: true,
+        select: uids && uids.length ? "explicit" : "push_approved",
+        uids: uids && uids.length ? uids : null
+      }
+    });
+    S.pushPreview = { job, range: r, uids: uids || null };
+  } catch (e) {
+    S.pushPreview = { error: e };
+  }
+  render();
+}
+
+function pushDrawer() {
+  const back = el("div", "backdrop");
+  back.onclick = () => { S.drawer = null; render(); };
+  const d = el("aside", "drawer");
+  d.setAttribute("role", "dialog");
+  d.setAttribute("aria-label", "Push to Garmin");
+
+  const h = el("div", "drawer-h");
+  h.appendChild(el("h3", null, "Send to Garmin"));
+  h.appendChild(el("span", "spacer"));
+  const x = el("button", "iconbtn");
+  x.appendChild(svg("g-x", null));
+  x.setAttribute("aria-label", "Close");
+  x.onclick = () => { S.drawer = null; render(); };
+  h.appendChild(x);
+  d.appendChild(h);
+
+  const b = el("div", "drawer-b");
+  const p = S.pushPreview || {};
+  const job = S.pushJob || p.job;
+
+  if (p.loading) {
+    b.appendChild(el("div", "tile-sub", "Working out what would be sent…"));
+  } else if (p.error) {
+    const bn = el("div", "banner bad");
+    bn.appendChild(svg("g-warn", null));
+    bn.appendChild(el("div", null, p.error.message));
+    b.appendChild(bn);
+  } else if (job) {
+    const items = job.items || [];
+    if (!items.length) {
+      b.appendChild(el("div", "tile-sub",
+        "Nothing is approved for push yet. Open a workout's ⋮ menu and choose "
+        + "“Approve for push”, then come back."));
+    }
+    items.forEach(it => {
+      const row = el("div", "pushrow");
+      const t = el("div", "pushrow-t");
+      const state = it.state === "done" ? "done" : it.state === "failed" ? "failed" : (it.action || "");
+      t.appendChild(el("span", "actionchip " + state, it.state === "done" ? "sent"
+        : it.state === "failed" ? "failed" : (it.action || "")));
+      t.appendChild(el("span", "pt", it.title));
+      t.appendChild(el("span", "loadlab", shortDay(it.date) + " " + dayNum(it.date)));
+      row.appendChild(t);
+      // The honesty component: the ICS has no structured steps, so most
+      // sessions land as a timed placeholder. Say so BEFORE it reaches the bike.
+      if (it.reason) row.appendChild(el("div", "pushrow-r", it.reason));
+      if (it.error) {
+        const e = el("div", "pushrow-r");
+        e.style.color = "var(--status-critical)";
+        e.textContent = it.error.message || String(it.error);
+        row.appendChild(e);
+      }
+      b.appendChild(row);
+    });
+
+    if (job.state === "running" || job.state === "queued") {
+      const pr = el("div", "banner");
+      pr.appendChild(svg("g-up", null));
+      const c = el("div");
+      c.style.flex = "1";
+      c.appendChild(el("span", "bt", "Sending… " + (job.progress ? job.progress.done + " of " + job.progress.total : "")));
+      const bar = el("div", "progress");
+      const s = el("span");
+      s.style.width = job.progress && job.progress.total
+        ? Math.round(100 * job.progress.done / job.progress.total) + "%" : "5%";
+      bar.appendChild(s);
+      c.appendChild(bar);
+      pr.appendChild(c);
+      b.appendChild(pr);
+    }
+    if (job.state === "done" || job.state === "partial" || job.state === "failed") {
+      const sum = job.summary || {};
+      const kind = sum.failed ? "warn" : "";
+      const bn = el("div", "banner " + kind);
+      bn.appendChild(svg(sum.failed ? "g-warn" : "g-check", null));
+      const c = el("div");
+      if (!job.dry_run) {
+        c.appendChild(el("span", "bt",
+          "Sent " + ((sum.created || 0) + (sum.rescheduled || 0) + (sum.updated || 0)) + " to Garmin"
+          + (sum.failed ? ", " + sum.failed + " failed" : "")));
+        c.appendChild(document.createTextNode(
+          "Sync your Edge 520 with Garmin Connect to get these on the device."));
+      } else {
+        c.appendChild(el("span", "bt", "Nothing sent yet — this is a preview."));
+        c.appendChild(document.createTextNode(
+          "Most sessions go over as a timed placeholder, because the TrainingPeaks feed "
+          + "carries text, not power targets."));
+      }
+      bn.appendChild(c);
+      b.appendChild(bn);
+    }
+  }
+  d.appendChild(b);
+
+  const f = el("div", "drawer-f");
+  const cancel = el("button", "btn", "Close");
+  cancel.onclick = () => { S.drawer = null; render(); };
+  const send = el("button", "btn primary", "Send to Garmin");
+  const running = job && (job.state === "running" || job.state === "queued");
+  send.disabled = !job || !job.items || !job.items.length || running
+    || (job && !job.dry_run) || !canPush();
+  if (!canPush()) send.title = "Garmin isn't connected — add your login to .env to send for real.";
+  send.onclick = () => confirmPush();
+  f.appendChild(cancel);
+  f.appendChild(el("span", "spacer"));
+  f.appendChild(send);
+  d.appendChild(f);
+
+  const frag = document.createDocumentFragment();
+  frag.appendChild(back);
+  frag.appendChild(d);
+  return frag;
+}
+
+async function confirmPush() {
+  const p = S.pushPreview || {};
+  const r = p.range || { start: S.anchor, end: addDays(S.anchor, 6) };
+  try {
+    const job = await api("/api/push", {
+      method: "POST",
+      body: {
+        start: r.start, end: r.end, dry_run: false,
+        select: p.uids && p.uids.length ? "explicit" : "push_approved",
+        uids: p.uids || null
+      }
+    });
+    S.pushJob = job;
+    S.pushPreview = { job, range: r, uids: p.uids };
+    render();
+    pollPush(job.job_id);
+  } catch (e) {
+    if (e.code === "push_in_flight" && e.detail && e.detail.job_id) {
+      pollPush(e.detail.job_id);
+      return;
+    }
+    S.pushPreview = Object.assign({}, S.pushPreview, { error: e });
+    render();
+  }
+}
+
+function pollPush(jobId) {
+  clearTimeout(S.pollTimer);
+  const tick = async () => {
+    try {
+      const job = await api("/api/push/" + encodeURIComponent(jobId));
+      S.pushJob = job;
+      if (S.pushPreview) S.pushPreview.job = job;
+      render();
+      if (job.state === "running" || job.state === "queued") {
+        S.pollTimer = setTimeout(tick, 1200);
+      } else {
+        await loadAll();
+        const sum = job.summary || {};
+        announce("Push finished.");
+        if (sum.failed) toast(sum.failed + " workout(s) failed to send — see the drawer.", "bad");
+        else toast("On Garmin. Sync your Edge 520 to get them on the bike.");
+      }
+    } catch (e) {
+      toast(e.message, "bad");
+    }
+  };
+  tick();
+}
+
+/* -------------------------------------------------------------- help drawer */
+function helpDrawer() {
+  const back = el("div", "backdrop");
+  back.onclick = () => { S.drawer = null; render(); };
+  const d = el("aside", "drawer");
+  d.setAttribute("role", "dialog");
+  d.setAttribute("aria-label", "Keyboard shortcuts");
+  const h = el("div", "drawer-h");
+  h.appendChild(el("h3", null, "Keyboard"));
+  h.appendChild(el("span", "spacer"));
+  const x = el("button", "iconbtn");
+  x.appendChild(svg("g-x", null));
+  x.onclick = () => { S.drawer = null; render(); };
+  h.appendChild(x);
+  d.appendChild(h);
+  const b = el("div", "drawer-b");
+  const g = el("div", "helpgrid");
+  [["← →", "Previous / next week"],
+   ["T", "Table view — every value, no colour needed"],
+   ["U", "Mark the focused day unavailable"],
+   ["Space", "Pick up the focused workout, then ← → to move it, Space to drop"],
+   ["Esc", "Cancel a pick-up / close a panel"],
+   ["A / R", "Approve / reject the selected suggestion"],
+   ["P", "Open the push drawer"],
+   ["?", "This list"]].forEach(([k, v]) => {
+    g.appendChild(el("span", "kbd", k));
+    g.appendChild(el("span", null, v));
+  });
+  b.appendChild(g);
+  b.appendChild(el("div", "tile-sub",
+    "Drag and drop works with a mouse. On a phone, use a card's ⋮ menu → Move to."));
+  d.appendChild(b);
+  const frag = document.createDocumentFragment();
+  frag.appendChild(back);
+  frag.appendChild(d);
+  return frag;
+}
+
+/* ============================================================== keyboard */
+document.addEventListener("keydown", ev => {
+  const tag = (ev.target.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") return;
+
+  if (ev.key === "Escape") {
+    if (S._popover) { closePopover(); return; }
+    if (S.carry) { S.carry = null; render(); announce("Cancelled."); return; }
+    if (S.drawer) { S.drawer = null; render(); return; }
+    if (S.railOpen) { S.railOpen = false; render(); return; }
+    return;
+  }
+  if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+
+  const focusedCard = document.activeElement && document.activeElement.closest
+    ? document.activeElement.closest(".card") : null;
+
+  if (ev.key === " " || ev.key === "Spacebar") {
+    if (focusedCard && focusedCard.dataset.uid) {
+      ev.preventDefault();
+      if (S.carry === focusedCard.dataset.uid) {
+        S.carry = null; render(); announce("Dropped.");
+      } else {
+        S.carry = focusedCard.dataset.uid;
+        render();
+        announce("Picked up. Use left and right arrows to choose a day, then space to drop.");
+      }
+      return;
+    }
+  }
+  if ((ev.key === "ArrowLeft" || ev.key === "ArrowRight")) {
+    if (S.carry) {
+      ev.preventDefault();
+      const w = findWorkout(S.carry);
+      if (w) {
+        const target = addDays(w.date, ev.key === "ArrowRight" ? 1 : -1);
+        moveWorkout(S.carry, target);
+        announce("Moved to " + longDay(target) + ".");
+      }
+      return;
+    }
+    ev.preventDefault();
+    step(ev.key === "ArrowRight" ? 1 : -1);
+    return;
+  }
+  const k = ev.key.toLowerCase();
+  if (k === "t") { S.table = !S.table; render(); }
+  else if (k === "u") { const d = S.focusDate; if (d) toggleAvailability(d, document.querySelector('[data-date="' + d + '"] .dayhead') || document.body); }
+  else if (k === "p") { if (approvedCount()) openPushDrawer(); }
+  else if (k === "a") { const p = allProposals().find(x => x.proposal_id === S.selectedProposal); if (p) approveProposal(p); }
+  else if (k === "r") { const p = allProposals().find(x => x.proposal_id === S.selectedProposal); if (p) rejectProposal(p); }
+  else if (ev.key === "?") { S.drawer = "help"; render(); }
+});
+
+/* ================================================================ wiring */
+function step(dir) {
+  S.anchor = S.view === "week"
+    ? addDays(S.anchor, 7 * dir)
+    : iso(new Date(parseISO(S.anchor).getFullYear(), parseISO(S.anchor).getMonth() + dir, 1));
+  S.focusDate = S.anchor;
+  loadAll();
+}
+$("#prev").onclick = () => step(-1);
+$("#next").onclick = () => step(1);
+$("#today").onclick = () => {
+  S.anchor = S.view === "week" ? mondayOf(todayISO()) : todayISO();
+  S.focusDate = todayISO();
+  loadAll();
+};
+$("#v-week").onclick = () => {
+  if (S.view === "week") return;
+  S.view = "week"; S.table = false;
+  S.anchor = mondayOf(S.anchor);
+  loadAll();
+};
+$("#v-month").onclick = () => {
+  if (S.view === "month") return;
+  S.view = "month"; S.table = false;
+  loadAll();
+};
+$("#feedpill").onclick = async () => {
+  S.fetching = true; render();
+  try { await api("/api/refresh", { method: "POST", body: { sources: ["trainingpeaks_ics", "garmin"] } }); }
+  catch (e) { /* the source state itself will report the failure */ }
+  await loadAll(true);
+};
+$("#themebtn").onclick = () => {
+  S.theme = S.theme === "auto" ? "light" : S.theme === "light" ? "dark" : "auto";
+  saveLocal();
+  render();
+  announce("Theme: " + S.theme);
+};
+$("#railbtn").onclick = () => { S.railOpen = !S.railOpen; render(); };
+$("#pushbtn").onclick = () => openPushDrawer();
+window.addEventListener("resize", () => { renderRail(); });
+
+/* ------------------------------------------------------------------- boot */
+loadLocal();              // render whatever we had, instantly — offline-first
+render();
+loadAll();
+</script>
+</body>
+</html>
