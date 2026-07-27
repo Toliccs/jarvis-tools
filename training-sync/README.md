@@ -11,7 +11,8 @@ their Terms of Service.
 |---|---|---|
 | Garmin Connect | Authenticated client using your own login (`garminconnect`/`garth`, same endpoints the mobile app uses) | **Working** — implemented in `garmin_client.py` |
 | Strava | Official OAuth API + webhooks | **Working** — implemented in `strava_client.py`, useful as an alternate live-feed source since Garmin already pushes here reliably |
-| TrainingPeaks | Official Partner API (OAuth2) | **Blocked on API access** — see below |
+| TrainingPeaks (planned workouts, read-only) | Personal calendar feed (ICS/webcal URL from TrainingPeaks Settings) | **Working** — implemented in `trainingpeaks_calendar_feed.py`; gives date/title/description of planned workouts, no approval needed |
+| TrainingPeaks (structured fields + write-back) | Official Partner API (OAuth2) | **Blocked on API access** — see below |
 
 ### Why TrainingPeaks is different
 
@@ -46,8 +47,12 @@ login endpoint).
 - `garmin_client.py` — pulls recent activities, current stats, and (where
   the API exposes it) live activity data from Garmin Connect.
 - `strava_client.py` — OAuth2 client + webhook handler for activity events.
+- `trainingpeaks_calendar_feed.py` — reads planned workouts (date, title,
+  description) from your TrainingPeaks calendar feed URL. Working today,
+  read-only, no approval needed.
 - `trainingpeaks_client.py` — skeleton for the official Partner API; not
-  functional until you have approved credentials.
+  functional until you have approved credentials. Needed for structured
+  fields (target power/HR/TSS) and write-back.
 - `alfred_adapter.py` — example glue code showing how Alfred would pull a
   live feed and where race-day training-adjustment logic plugs in. The
   actual adjustment logic (how a race result should change your plan) is
