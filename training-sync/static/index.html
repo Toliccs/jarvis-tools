@@ -316,6 +316,10 @@ h1,h2,h3,h4,p{margin:0}
 .card-push.warn{background:color-mix(in srgb,var(--status-warning) 20%,transparent);color:var(--ink)}
 .card-push.bad{background:color-mix(in srgb,var(--status-critical) 14%,transparent);color:var(--ink)}
 .card-push .rt{margin-left:auto}
+/* The "…and this app can't take it off — do it in Garmin Connect" line.
+   Its own row under the badge, normal weight: it is the explanation, not the
+   headline, and it is deliberately not a control. */
+.card-push-hint{flex:0 0 100%;font-weight:440;font-size:11px;color:var(--ink-2);line-height:1.4}
 .chip{
   display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:640;
   padding:2px 7px;border-radius:999px;background:var(--surface-2);color:var(--ink-2);
@@ -522,6 +526,7 @@ h1,h2,h3,h4,p{margin:0}
 }
 .drawer-h h3{font-size:16px;font-weight:660;letter-spacing:-.01em}
 .drawer-b{flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:11px}
+.drawer-sub{font-size:13px;font-weight:640;color:var(--ink);margin-top:8px}
 .drawer-f{padding:14px 18px;border-top:1px solid var(--rule);display:flex;gap:9px;align-items:center;flex-wrap:wrap}
 .pushrow{border:1px solid var(--border);border-radius:10px;padding:11px 12px;
   display:flex;flex-direction:column;gap:6px;background:var(--plane)}
@@ -744,7 +749,6 @@ td.wrap{white-space:normal;min-width:190px}
      POST   /api/workouts/{uid}/move           {to_date,expected_rev,allow_unavailable}
      PATCH  /api/workouts/{uid}                {push_approved,status,...}
      DELETE /api/workouts/{uid}/override
-     POST   /api/workouts/{uid}/unpush
      POST   /api/proposals                     {start,end,reason}
      POST   /api/proposals/{id}/approve        {force}
      POST   /api/proposals/{id}/reject         {reason}
@@ -760,27 +764,39 @@ td.wrap{white-space:normal;min-width:190px}
    capabilities.can_write_to_garmin), and that particular session is approved
    (push_approved). A preview needs none of them and always works.
 
-   Removal (/unpush) is a Garmin write too and is gated the same way, minus
-   push_approved: it is only ever offered on a session this app actually put
-   there (garmin.on_garmin), and only ever when the athlete asks. Skipping or
-   dropping a session never removes anything by itself — it says the copy is
-   still on the calendar and offers the way off.
+   THIS APP NEVER TAKES A SESSION OFF THE GARMIN CALENDAR. Sending is the
+   only Garmin write it makes. There is no /unpush endpoint, no Remove button,
+   and no code below that may grow one — a removal whose outcome could not be
+   verified was reported to the athlete as a failed *push*, and the card then
+   offered "Retry", which sends. Where this app knows a copy is still on the
+   calendar it says so and names Garmin Connect, which removes a session in one
+   click and cannot be wrong about whether it worked. `garmin.on_garmin` is
+   what those sentences are drawn from.
 
-   Three fields carry a refusal, and none of them may be swallowed. The writer
-   now stops rather than act on a calendar it could not read, and a refusal
-   that reaches nobody is indistinguishable from a success:
+   Two fields carry a refusal, and neither may be swallowed. The writer stops
+   rather than act on a calendar it could not read, and a refusal that reaches
+   nobody is indistinguishable from a success:
 
-     workouts[].garmin.removal      the last removal this app REFUSED to make
-                                    ({state,action,message,retryable}) — the
-                                    only thing that tells a refused removal
-                                    apart from a refused push, which leaves
-                                    the identical push_state on the record.
      days[].garmin.scheduled_readable
                                     false = the calendar could not be read, so
                                     an empty `scheduled` is no evidence at all.
+                                    "Nothing is on your Garmin calendar" and
+                                    "I could not read your Garmin calendar"
+                                    must never be drawn the same way: the first
+                                    says he is clear, the second says this app
+                                    does not know.
      status.store.migration_notes   push identity the store would not inherit:
                                     a copy left on Garmin that nothing here can
-                                    remove, and only the athlete can.
+                                    reach, and only the athlete can clear.
+
+   UNDO IS NOT WIRED INTO THIS PAGE, on purpose. GET /api/history and
+   POST /api/history/{entry_id}/undo work over HTTP, but the store's undo is a
+   per-uid stack with no notion of a group. An approved SWAP writes two
+   workouts, so undoing one of them puts one session back and leaves the other
+   moved — both on the same day. That is exactly the double-booking the swap's
+   own rollback logic exists to prevent, and one click would create it. A
+   history panel here waits on group-undo in the store; until then the page
+   says so rather than shipping the button. See helpDrawer().
    ========================================================================= */
 
 const $ = (s, r) => (r || document).querySelector(s);
@@ -1575,29 +1591,14 @@ function workoutCard(w, day) {
       r.onclick = ev => { ev.stopPropagation(); openPushDrawer([w.uid]); };
       ps.appendChild(r);
     }
-    // A session he has taken off his week while a copy is still on the Edge —
-    // or one this app refused to remove — is where the way out belongs on the
-    // card, not two clicks into a menu: the badge states a problem, so it
-    // carries the fix. A refused removal MUST keep this. Losing it is how a
-    // copy ended up on the Edge with nothing on screen pointing at it.
-    if (push.remove) {
-      const blocked = removeBlockedReason();
-      const r = el("button", "rt", push.removeLabel || "Remove");
-      r.style.textDecoration = "underline";
-      if (blocked) {
-        r.disabled = true;
-        r.setAttribute("aria-disabled", "true");
-        r.title = blocked;
-      } else {
-        r.title = push.retryable === false
-          ? "Try it again anyway — if you've already deleted it in Garmin "
-            + "Connect, this is what lets the app catch up."
-          : "Unschedules this app's copy. The workout stays in your Garmin "
-            + "library.";
-        r.onclick = ev => { ev.stopPropagation(); removeFromGarmin(w); };
-      }
-      ps.appendChild(r);
-    }
+    // A session he has taken off his week while a copy is still on the Edge.
+    // The badge states the problem, so it carries the answer — as a sentence.
+    // There is no Remove button here and there must never be one again: the
+    // one that used to sit in this spot reported its refusals as failed
+    // pushes, and the card then offered "Retry", which sends. Losing the
+    // *sentence* is the other half of the bug — a copy on the Edge with
+    // nothing on screen pointing at it — so `hint` is never dropped.
+    if (push.hint) ps.appendChild(el("div", "card-push-hint", push.hint));
     card.appendChild(ps);
   }
 
@@ -1614,6 +1615,19 @@ function workoutCard(w, day) {
    anything reaching for `document` or `S` belongs outside the markers. */
 /* --8<-- ui-logic-start --8<-- */
 
+/* One sentence, said everywhere this app knows a copy of a session is on the
+   athlete's Garmin calendar and his plan here says otherwise.
+
+   It is a sentence and not a button because this app does not remove sessions
+   from Garmin. It used to. The removal could not report its own outcome
+   honestly — a refusal landed in the store as a failed *push*, and the card
+   then offered "Retry", which sends — so the whole path was deleted rather
+   than guarded a sixth time. Garmin Connect does this in one click and knows
+   whether it worked. */
+const GARMIN_REMOVES_IT =
+  "This app never takes sessions off your Garmin calendar. Delete it in "
+  + "Garmin Connect if you don't want it on your Edge.";
+
 /* Push outcome is its OWN region (bottom strip) with its own palette, never
    the border — the border belongs to provenance.
    `w` is a workout from /api/calendar; `job` is the push job in flight, or
@@ -1627,52 +1641,43 @@ function pushInfo(w, job) {
     return { cls: "bad", text: "✕ Push failed — " + (live.error && live.error.message ? live.error.message : "Garmin rejected it"), retry: true };
   }
   const g = w.garmin || {};
-  const rm = g.removal;
-  /* A refused REMOVAL, said first and said as itself.
-     The writer now stops rather than acting on a calendar it could not read,
-     and records that the same way a refused push is recorded: push_state
-     "failed", with the reason on the record. Read back through push_state
-     alone this card said "✕ Push failed" and offered Retry — which SENDS the
-     session. He asked for it to come off. So the removal outcome is answered
-     before the push outcome, in its own words, and it always carries the way
-     to try again: the copy is still on his calendar, and this badge is the
-     only thing on screen pointing at it.
+  /* Said first, because it is the state where the calendar here and the
+     calendar on the Edge disagree: he has struck the session off his week and
+     a copy of it is still sitting on the device. Skipping is a local decision
+     and never unschedules anything, so the card has to say the copy is there
+     — and say where it goes.
 
-     Gated on `on_garmin` because that is what makes the sentence true. Once
-     nothing of ours is on the calendar there is nothing left to fail to
-     remove, and a warning about an attempt is worse than no warning at all. */
-  if (rm && rm.state === "failed" && g.on_garmin) {
-    return {
-      cls: "bad",
-      text: "✕ Couldn't take it off Garmin — " + (rm.message || "Garmin refused."),
-      remove: true,
-      removeLabel: "Try again",
-      // False when the calendar was read and the row is not provably ours:
-      // pressing the button again will refuse again, and the message says so.
-      // The affordance stays regardless — if he clears it in Garmin Connect,
-      // the retry is what lets this app catch up and forget its record.
-      retryable: rm.retryable !== false
-    };
-  }
-  // Said next, because it is the other state where the calendar here and the
-  // calendar on the Edge disagree: he has struck the session off his week and
-  // a copy of it is still sitting on the device. Skipping is a local decision
-  // and never unschedules anything, so the card has to say the copy is there.
+     There used to be a "Remove" button here. It is gone. A removal this app
+     could not verify was written to the store as a failed PUSH, and after a
+     restart this same badge read that record, said "Push failed" and offered
+     "Retry" — the button that sends. Garmin Connect removes a session from
+     the calendar in one click and cannot be wrong about whether it worked, so
+     that is what the card names. `hint` is a sentence, never an action. */
   if (g.on_garmin && w.status === "skipped") {
-    return { cls: "warn", text: "⚠ Skipped — still on your Garmin calendar", remove: true };
+    return {
+      cls: "warn",
+      text: "⚠ Skipped — still on your Garmin calendar",
+      hint: GARMIN_REMOVES_IT
+    };
   }
   if (g.push_state === "scheduled") return { cls: "good", text: "✓ On Garmin · not yet synced to Edge" };
   if (g.push_state === "drifted") return { cls: "warn", text: "⚠ Changed since it was pushed" };
   if (g.push_state === "failed") {
     /* The writer's own sentence, verbatim. It says which day, what it could
        not prove, and whether the remedy is to try again or to go and move
-       something in Garmin Connect — all of which "✕ Push failed" threw away. */
+       something in Garmin Connect — all of which "✕ Push failed" threw away.
+
+       `retry` here is honest: nothing was sent, and sending is the remedy.
+       That is precisely why nothing else in this function may ever return
+       `retry` — a badge about a session the athlete wanted taken OFF must not
+       hand him the button that puts it on. */
     return {
       cls: "bad",
       text: "✕ " + (g.error || "Push failed"),
       retry: true,
-      // Nothing was sent, but an earlier copy may still be sitting there.
-      remove: !!g.on_garmin
+      // Nothing was sent, but an earlier copy may still be sitting there, and
+      // this app cannot take it off.
+      hint: g.on_garmin ? GARMIN_REMOVES_IT : null
     };
   }
   if (w.push_approved) return { cls: "", text: "↑ Approved for push" };
@@ -1683,14 +1688,31 @@ function pushInfo(w, job) {
    line". This is the panel he reads to see what is actually on the account,
    as opposed to what this app believes it put there, so the one thing it may
    never do is answer "nothing" when the truth is "no answer". */
+function calendarWasRead(dayGarmin) {
+  /* The single test for "Garmin answered about this day", asked the same way
+     everywhere. Positive: only an explicit `true` counts. The server sets
+     `scheduled_readable` on every day it emits, so anything else — the field
+     missing, null, a shape this page doesn't recognise — means this page is
+     not holding an answer, and the honest render for that is "I don't know",
+     never "you're clear". The writer's own read now fails the same way: a
+     month that comes back as a rate-limit body, an empty body or a shape it
+     can't parse is BLOCKED, not empty. */
+  return (dayGarmin || {}).scheduled_readable === true;
+}
+
 function garminPanel(day) {
   const g = (day && day.garmin) || {};
-  if (g.scheduled_readable === false) {
+  if (!calendarWasRead(g)) {
     /* Short, because the calendar is read a month at a time and a failure
        lands on every day on screen at once — the explanation and the way out
        belong in one banner, not repeated seven times down the week. What has
        to be *here* is the mark on the day itself: without it an unanswered
-       day is drawn exactly like a clear one. */
+       day is drawn exactly like a clear one.
+
+       Note this returns a panel even with zero rows, which is the whole
+       point: "nothing is on your Garmin calendar" and "I could not read your
+       Garmin calendar" are different facts and must never look the same. The
+       first means he is clear. The second means this app does not know. */
     return { state: "unreadable", text: "Garmin calendar unread", rows: [] };
   }
   const rows = (g.scheduled || []).slice();
@@ -1701,8 +1723,8 @@ function garminPanel(day) {
     rows: rows.map(r => ({
       title: r.title || "Untitled workout",
       ours: !!r.owned_by_us,
-      // Said plainly, because it decides what he can do about it here: this
-      // app only ever touches copies it can prove it wrote.
+      // Said plainly, because it is what separates a session this app sent
+      // from one the athlete built himself. This app writes neither back.
       note: r.owned_by_us ? "sent from here" : "yours — not this app's"
     }))
   };
@@ -1714,8 +1736,10 @@ function garminPanel(day) {
    is noise that hides the one thing he needs to know — that the empty days
    below are not evidence of anything. */
 function unreadableDays(cal) {
+  // Same test as the day strip, on purpose — a day marked unread below the
+  // fold and no banner above it is how one of these gets missed.
   return ((cal && cal.days) || [])
-    .filter(d => d.garmin && d.garmin.scheduled_readable === false)
+    .filter(d => !calendarWasRead(d.garmin))
     .map(d => d.date);
 }
 
@@ -2472,71 +2496,34 @@ async function setStatus(uid, status) {
     const w = findWorkout(uid);
     const onGarmin = w && w.garmin && w.garmin.on_garmin;
     if (onGarmin) {
-      toast("Skipped here — but it's still on your Garmin calendar.", null,
-        removeBlockedReason() ? null
-          : { label: "Remove from Garmin", fn: () => removeFromGarmin(w) });
+      // No action offered, because this app has none to offer: it does not
+      // take sessions off the Garmin calendar. The card badge under the
+      // session repeats this and stays on screen after the toast has gone.
+      toast("Skipped here — but it's still on your Garmin calendar. "
+        + GARMIN_REMOVES_IT);
       return;
     }
     toast("Skipped — it won't be sent to your Edge.");
   } catch (e) { toast(e.message, "bad"); }
 }
 
-/* ------------------------------------------------------ removal from Garmin */
-/* The only thing in this app that takes a session OFF the athlete's calendar,
-   and it never runs on its own: skipping, dropping or reverting a session
-   changes the plan here and leaves the copy on the Edge until he asks for it
-   to go. The template stays in his Garmin library either way — this removes a
-   session from a calendar, it does not destroy anything.
+/* -------------------------------------------- taking a session off Garmin */
+/* There is no function here, and that is the feature.
 
-   Same per-machine opt-in as a push, and the server checks it again on the
-   write path, so a capability read that has gone stale here can only ever
-   cost him a clear error, never an unwanted write. */
-async function removeFromGarmin(w) {
-  try {
-    const res = await api("/api/workouts/" + encodeURIComponent(w.uid) + "/unpush",
-      { method: "POST" });
-    await loadAll();
-    const r = res.result || {};
-    toast(r.state === "skipped"
-      ? "There was nothing of ours on your Garmin calendar."
-      : "Taken off your Garmin calendar. Sync your Edge to clear it there too.");
-  } catch (e) {
-    if (e.code === "writes_disabled") {
-      // Redraw with the real capability rather than leaving an affordance
-      // that can only fail.
-      try { S.status = await api("/api/status"); } catch (ignored) { /* keep the old one */ }
-      render();
-      toast(e.message, "bad");
-      return;
-    }
-    /* A refusal, not a breakage. The writer stopped rather than act on a
-       calendar it could not read, so the session is exactly where it was and
-       trying again is very often the whole fix.
+   `removeFromGarmin` and `removeBlockedReason` used to live at this spot and
+   called POST /api/workouts/{uid}/unpush. Both are deleted along with the
+   endpoint. The reason is not that removal was unimportant — it is that a
+   removal this app could not verify had no honest way to say so: the refusal
+   was stored as `push_state: "failed"`, identical to a refused push, and one
+   restart later the card read it back as a failed push and offered "Retry",
+   which sends the session. The athlete asked for it to come off and was
+   handed the button that puts it on.
 
-       Reloading here is the part that used to be missing: without it the card
-       kept whatever it was showing before the attempt, and the one thing on
-       screen that could say "the copy is still there, here's the way off"
-       never appeared. `garmin.removal` on the reloaded workout is what draws
-       the badge and its Try again. */
-    const still = e.detail && e.detail.still_on_garmin;
-    try { await loadAll(); } catch (ignored) { /* the toast still lands */ }
-    const retryable = !e.detail || e.detail.retryable !== false;
-    toast(e.message, "bad",
-      (still && retryable && !removeBlockedReason())
-        ? { label: "Try again", fn: () => removeFromGarmin(w) }
-        : null);
-  }
-}
-
-/* Why removal can't be offered right now, or null when it can. Ordered
-   most-specific first so the hint names the actual obstacle. */
-function removeBlockedReason() {
-  if (isDemo()) return "Demo mode never writes to Garmin, including removals.";
-  if (!canPush()) return "Garmin isn't connected — add your login to .env.";
-  if (!canWrite()) return writesBlockedReason()
-    || "Writing to Garmin is switched off on this machine.";
-  return null;
-}
+   So the app sends, and only sends. Garmin Connect takes a session off the
+   calendar in one click and knows whether that worked. Everywhere this app
+   can see a copy still sitting there it says so — see GARMIN_REMOVES_IT and
+   every place it is used. Nothing below may turn that sentence into a
+   button. */
 
 /* --------------------------------------------------------------- card menu */
 function openCardMenu(w, anchor) {
@@ -2587,15 +2574,15 @@ function openCardMenu(w, anchor) {
   item(w.status === "skipped" ? "Un-skip" : "Skip this session",
     () => setStatus(w.uid, w.status === "skipped" ? null : "skipped"));
 
-  // Offered only where this app actually put a copy. A workout he built in
-  // Garmin Connect himself is not ours to unschedule, and the server refuses
-  // it — the menu must not pretend otherwise.
+  // Where this app has put a copy on the calendar, the menu says so — as a
+  // line of text, not a menu item. This is the second place the athlete goes
+  // looking for "Remove from Garmin", so it is the second place that has to
+  // answer him rather than stay silent and let him hunt.
   if (w.garmin && w.garmin.on_garmin) {
-    const blocked = removeBlockedReason();
-    const rm = item("Remove from Garmin", () => removeFromGarmin(w),
-      blocked || "Unschedules this app's copy. The workout itself stays in "
-      + "your Garmin library, and nothing on your plan here changes.");
-    if (blocked) { rm.disabled = true; rm.setAttribute("aria-disabled", "true"); }
+    pop.appendChild(el("div", "pop-lab", "On your Garmin calendar"));
+    const note = el("div", "tile-sub", GARMIN_REMOVES_IT);
+    note.style.marginTop = "-2px";
+    pop.appendChild(note);
   }
 
   if (w.override) {
@@ -2791,19 +2778,11 @@ function pushDrawer() {
         if (failure && failure === it.reason) r.style.color = "var(--status-critical)";
         row.appendChild(r);
       }
-      // A row that reports a copy still on the calendar has to be actionable
-      // from here. Sending is not what clears it — removal is.
-      if (it.on_garmin && it.action === "skip") {
-        const rmw = findWorkout(it.uid);
-        const blocked = removeBlockedReason();
-        const rm = el("button", "btn sm", "Remove from Garmin");
-        rm.style.marginTop = "6px";
-        rm.title = blocked || "Unschedules this app's copy. The workout stays "
-          + "in your Garmin library.";
-        rm.disabled = !!blocked || !rmw;
-        rm.onclick = () => removeFromGarmin(rmw || { uid: it.uid });
-        row.appendChild(rm);
-      }
+      // A row reporting a copy still on the calendar used to carry a "Remove
+      // from Garmin" button. It is gone with the rest of the removal path;
+      // the row's own `reason` (STILL_ON_GARMIN, written by the server) names
+      // Garmin Connect, so the sentence survives and the misleading button
+      // does not.
       if (failure && failure !== it.reason) {
         const e = el("div", "pushrow-r");
         e.style.color = "var(--status-critical)";
@@ -2957,7 +2936,7 @@ function helpDrawer() {
   d.setAttribute("role", "dialog");
   d.setAttribute("aria-label", "Keyboard shortcuts");
   const h = el("div", "drawer-h");
-  h.appendChild(el("h3", null, "Keyboard"));
+  h.appendChild(el("h3", null, "Keyboard & what this app won't do"));
   h.appendChild(el("span", "spacer"));
   const x = el("button", "iconbtn");
   x.appendChild(svg("g-x", null));
@@ -2980,6 +2959,28 @@ function helpDrawer() {
   b.appendChild(g);
   b.appendChild(el("div", "tile-sub",
     "Drag and drop works with a mouse. On a phone, use a card's ⋮ menu → Move to."));
+
+  /* The two things this app deliberately does not do. Both are here because
+     an athlete who goes looking for them and finds nothing assumes he has
+     missed a menu — the honest answer is cheaper than the hunt. */
+  b.appendChild(el("h4", "drawer-sub", "Taking a session off your Garmin calendar"));
+  b.appendChild(el("div", "tile-sub",
+    GARMIN_REMOVES_IT + " Sending is the only thing this app writes to your "
+    + "Garmin account. It used to offer a Remove button, and when Garmin "
+    + "wouldn't answer, that button couldn't tell you whether the session had "
+    + "come off — so it was taken out rather than left guessing. Skipping or "
+    + "moving a session here never changes anything on Garmin; where a copy is "
+    + "still on your calendar the card says so."));
+
+  b.appendChild(el("h4", "drawer-sub", "Undo"));
+  b.appendChild(el("div", "tile-sub",
+    "There is no undo button on this page yet. Every change is recorded and "
+    + "the server can reverse one, but a swap moves two sessions and the "
+    + "reversal currently only understands one at a time — undoing half a swap "
+    + "would put both sessions on the same day, which is the thing the swap "
+    + "was computed to avoid. Until it can undo both together, the button "
+    + "isn't here. To reverse a move, drag the session back; to drop your own "
+    + "changes to a session, use its ⋮ menu → “Revert to the coach's plan”."));
   d.appendChild(b);
   const frag = document.createDocumentFragment();
   frag.appendChild(back);

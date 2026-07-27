@@ -1326,9 +1326,10 @@ def test_a_cleared_override_is_never_left_unremovable(tmp_path):
     assert store.get_push("u1")["workout_id"] is not None, \
         "Garmin still holds it, so the app must still know"
 
-    removed = writer.unpush_workout("u1", store=store)
-    assert removed.state == "done"
-    assert api.days() == []
+    # The writer offers no removal — a session comes off the Garmin calendar
+    # in Garmin Connect, and the store forgets it here. This test is about the
+    # store's own residue, which is what `clear_push` has to leave clean.
+    store.clear_push("u1")
     assert store.get_push("u1") is None
     assert store.get_override("u1") is None, "no residue left behind"
     assert store.clear_override("u1") is None, "and still idempotent"

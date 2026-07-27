@@ -1,7 +1,10 @@
-# 0.3.2 is the version the workout-write path was verified against:
-# upload_workout / schedule_workout / unschedule_workout /
-# get_scheduled_workouts / delete_workout. Older releases may not expose
-# the scheduling calls, which would fail at push time rather than install.
+# 0.3.2 is the version the workout-write path was verified against. The only
+# calls this app makes are upload_workout / schedule_workout /
+# get_scheduled_workouts, plus unschedule_workout — used solely to replace a
+# copy this app can prove it wrote, never to take a session off the calendar
+# on the athlete's behalf. `delete_workout` is deliberately never called: it
+# destroys a template that may not be ours. Older releases may not expose the
+# scheduling calls, which would fail at push time rather than install.
 garminconnect>=0.3.2
 requests>=2.31
 python-dotenv>=1.0
@@ -12,3 +15,10 @@ icalendar>=5.0
 # plain HTML/CSS/JS served from training-sync/static/.
 fastapi>=0.110
 uvicorn>=0.27
+
+# Starlette's TestClient — which every HTTP-surface test runs through, including
+# the two that nail the network shut at the `garminconnect` boundary — needs
+# httpx. FastAPI only pulls it in via extras (fastapi[standard]), so without it
+# here a plain `pip install -r requirements.txt` leaves 79 of the 308 tests
+# silently skipped, the two network-guard tests among them.
+httpx>=0.27,<0.29

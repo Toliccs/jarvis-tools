@@ -10,7 +10,12 @@ without the new id, and `expose_schedule_ids=False` also hides it from the
 calendar listing — the combination under which the writer genuinely cannot
 address a copy it put there.
 
-The three defects locked down here:
+`listing_payload` is the third switch, and the one this round turns on most:
+it makes the fake answer a calendar read with an arbitrary 200-shaped body,
+which is how Garmin returns an error, an empty envelope, or a shape nobody
+here has seen before.
+
+The defects locked down here:
 
 DEFECT 3  a month read cached for the life of the process let a push decide a
           copy was already on the calendar when the athlete had deleted it —
@@ -19,6 +24,18 @@ DEFECT 4  an update whose old copy had no reachable schedule id scheduled a
           second copy and said nothing.
 DEFECT 8  titles read back off the calendar carried the `[ts:xxxxxxxx]`
           ownership marker into anything that displayed them.
+DEFECT D4 a create whose calendar read failed treated the day as clear.
+DEFECT D6 the same, for every failure that came back looking like success: a
+          rate-limited Garmin was indistinguishable from an empty calendar.
+DEFECT D7 a stored schedule id went straight to `unschedule`, so an unmarked
+          session of the athlete's own was taken off their calendar by an
+          update, and moved to another day by a reschedule.
+DEFECT D8 a no-op said "Already on Garmin" without reading the calendar, and
+          went on saying it after the athlete deleted the session there.
+
+There is no removal path to test any more, and no tests for one. Taking a
+session off the Garmin calendar is done in Garmin Connect; `unpush_workout`
+produced four separate reproduced defects across two rounds and is gone.
 """
 
 import os
@@ -36,6 +53,8 @@ from plan_store import PlanStore  # noqa: E402
 SAT, SUN = "2026-08-01", "2026-08-02"
 AUG = (2026, 8)
 
+_UNSET = object()
+
 
 class FakeGarminApi:
     """Stands in for `garminconnect.Garmin`.
@@ -51,6 +70,12 @@ class FakeGarminApi:
         self.schedule_returns_id = True
         self.expose_schedule_ids = True
         self.fail_listing = False
+        self.fail_unschedule = False
+        # A 200-shaped answer to substitute for the real listing. `_UNSET`
+        # rather than None because None is itself one of the answers under
+        # test — an empty body is exactly the case that used to read as an
+        # empty calendar.
+        self.listing_payload = _UNSET
         self._next_workout_id = first_workout_id
         self._next_schedule_id = 5000
 
@@ -77,6 +102,8 @@ class FakeGarminApi:
 
     def unschedule_workout(self, schedule_id):
         self.calls.append(("unschedule", schedule_id))
+        if self.fail_unschedule:
+            raise RuntimeError("Garmin refused the unschedule")
         row = next((r for r in self.calendar
                     if r["workoutScheduleId"] == schedule_id), None)
         if row is None:
@@ -89,6 +116,8 @@ class FakeGarminApi:
         self.calls.append(("list", prefix))
         if self.fail_listing:
             raise RuntimeError("Garmin calendar is unavailable")
+        if self.listing_payload is not _UNSET:
+            return self.listing_payload
         items = []
         for row in self.calendar:
             if not row["date"].startswith(prefix):
@@ -124,6 +153,8 @@ class NestedCalendarApi(FakeGarminApi):
         self.calls.append(("list", prefix))
         if self.fail_listing:
             raise RuntimeError("Garmin calendar is unavailable")
+        if self.listing_payload is not _UNSET:
+            return self.listing_payload
         by_date = {}
         for row in self.calendar:
             if not row["date"].startswith(prefix):
@@ -172,7 +203,7 @@ def test_a_stale_month_read_can_never_decide_a_copy_is_already_there(tmp_path):
     assert (first.action, first.state) == ("create", "done")
 
     # A calendar render reads the month the workout sits in.
-    writer.scheduled_in_month(*AUG)
+    writer.scheduled_rows(*AUG)
 
     # The store loses its ids, and the athlete deletes the workout in Garmin.
     store.clear_push("u1")
@@ -235,13 +266,13 @@ def test_a_month_read_is_cached_only_briefly(tmp_path, monkeypatch):
     ttl = writer_module.SCHEDULE_CACHE_TTL
     assert 0 < ttl <= 60, "a month read may not be trusted for long"
 
-    writer.scheduled_in_month(*AUG)
+    writer.scheduled_rows(*AUG)
     assert len(api.listings()) == 1
-    writer.scheduled_in_month(*AUG)
+    writer.scheduled_rows(*AUG)
     assert len(api.listings()) == 1, "within the TTL one read is enough"
 
     clock["t"] += ttl + 0.1
-    writer.scheduled_in_month(*AUG)
+    writer.scheduled_rows(*AUG)
     assert len(api.listings()) == 2, "after the TTL the calendar is re-read"
 
 
@@ -253,9 +284,9 @@ def test_the_month_cache_can_be_dropped_from_outside(tmp_path, monkeypatch):
     store = fresh_store(tmp_path)
     writer, api = writer_for(store)
 
-    writer.scheduled_in_month(*AUG)
+    writer.scheduled_rows(*AUG)
     writer.invalidate_schedule_cache()
-    writer.scheduled_in_month(*AUG)
+    writer.scheduled_rows(*AUG)
 
     assert len(api.listings()) == 2
 
@@ -361,8 +392,27 @@ def test_an_update_says_so_when_it_cannot_check_the_old_copy(tmp_path):
 
 
 def test_an_update_whose_unschedule_fails_still_warns(tmp_path):
-    """The pre-existing warning path: Garmin refused the unschedule, so a
-    previous copy may still be there and the athlete is told."""
+    """The pre-existing warning path: the old copy is provably ours and on the
+    calendar, Garmin refuses to take it off, and the athlete is told it may
+    still be there."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT)
+    api.fail_unschedule = True        # Garmin will not take it off
+
+    changed = push_threshold(writer, store, SAT, duration_s=5400)
+
+    assert changed.state == "done"
+    assert ("unschedule", 5000) in api.calls
+    assert "Garmin Connect" in (changed.reason or "")
+
+
+def test_an_update_does_not_warn_about_a_copy_the_calendar_says_is_gone(
+        tmp_path):
+    """The same setup as it used to be written, and the honest answer to it.
+    The stored schedule id is dead on Garmin, but the calendar was read and
+    holds no copy of ours — so there is nothing to unschedule, nothing to warn
+    about, and above all no id fired blind at `unschedule` on the off-chance."""
     store = fresh_store(tmp_path)
     writer, api = writer_for(store)
     push_threshold(writer, store, SAT)
@@ -371,7 +421,11 @@ def test_an_update_whose_unschedule_fails_still_warns(tmp_path):
     changed = push_threshold(writer, store, SAT, duration_s=5400)
 
     assert changed.state == "done"
-    assert "Garmin Connect" in (changed.reason or "")
+    assert not [c for c in api.calls if c[0] == "unschedule"], (
+        "an id out of the store was fired at Garmin with nothing behind it")
+    assert len(api.rows_on(SAT)) == 1
+    assert "Garmin Connect" not in (changed.reason or ""), (
+        f"warned about a copy it had proved was gone: {changed.reason}")
 
 
 def test_a_move_that_cannot_address_the_old_copy_never_leaves_two(tmp_path):
@@ -497,53 +551,400 @@ def test_scheduled_rows_reads_both_calendar_envelopes(tmp_path):
     assert writer_module.owns_workout(rows[1]["raw_title"], "u2")
 
 
-# --- removal: a calendar it could not read is not an empty calendar --------
+# --- D6: "unreadable" includes every answer that did not parse -------------
+#
+# The previous round fixed the exception-raising half of this and called it
+# fixed at the source. It was not: `read_scheduled_rows` reported
+# CALENDAR_BLOCKED only when the underlying call *raised*, so every 200-shaped
+# answer that yielded no rows — an empty body, an error envelope, a shape whose
+# date key this module does not know — arrived as `([], CALENDAR_READ)`, which
+# says "Garmin answered and that month is empty". A rate-limited account was
+# therefore indistinguishable from an athlete with nothing scheduled, and the
+# create path's adopt guard, whose whole job is to not duplicate, uploaded a
+# second copy onto a day it had never actually seen.
 
 
-def test_removal_that_cannot_read_the_calendar_keeps_the_ids(tmp_path):
-    """A removal clears the push record, so it must be certain first.
+UNPARSEABLE_ANSWERS = [
+    pytest.param(None, id="null-body"),
+    pytest.param({}, id="empty-object"),
+    pytest.param({"error": "rate limited", "statusCode": 429}, id="rate-limit"),
+    pytest.param({"errorMessage": "Bad Gateway", "httpStatus": 502},
+                 id="bad-gateway"),
+    pytest.param(
+        {"calendarItems": [{"workoutId": 999, "workoutScheduleId": 5000,
+                            "workoutName": "Threshold 3x12min",
+                            "scheduledOnDay": "2026-08-01"}]},
+        id="unknown-date-key"),
+    pytest.param({"calendarItems": "2026-08-01"}, id="not-a-collection"),
+]
 
-    `unpush_workout` recovered a missing schedule id through a helper that
-    answers "nothing of ours is there" and "I could not read the calendar"
-    with the same `None`. Taking that as "already gone" cleared the record —
-    forgetting the only ids able to unschedule the copy, while the copy was
-    still on the athlete's calendar and the app reported it removed. Nothing
-    could remove it afterwards: the exact orphan the removal path exists to
-    prevent.
+
+@pytest.mark.parametrize("answer", UNPARSEABLE_ANSWERS)
+def test_an_answer_that_did_not_parse_is_never_an_empty_calendar(tmp_path,
+                                                                 answer):
+    """D6 — the source fix, for 200-shaped failures as well as raised ones.
+
+    An error payload, a null or empty body and a shape this module does not
+    understand are all "no answer about that month". None of them may come
+    back as CALENDAR_READ, because CALENDAR_READ is a claim: it says the rows
+    are the whole truth and an empty list means an empty month.
+    """
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    api.listing_payload = answer
+
+    with pytest.raises(writer_module.GarminWriterError):
+        writer.scheduled_rows(*AUG, refresh=True)
+
+    rows, status = writer.read_scheduled_rows(*AUG, refresh=True)
+    assert (rows, status) == ([], writer_module.CALENDAR_BLOCKED), (
+        f"{answer!r} was read as a calendar this app could see")
+
+
+@pytest.mark.parametrize("answer", [
+    pytest.param([], id="bare-empty-list"),
+    pytest.param({"calendarItems": []}, id="empty-collection"),
+    pytest.param({"calendarItems": [{"calendarDate": "2026-08-03",
+                                     "items": []}]}, id="empty-day-node"),
+])
+def test_a_month_that_really_is_empty_still_reads_as_empty(tmp_path, answer):
+    """The half that must not be lost to the fix. A well-formed answer holding
+    no sessions is proof of an empty month, and a push that refused on it would
+    be a writer that can never write."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    api.listing_payload = answer
+
+    assert writer.read_scheduled_rows(*AUG, refresh=True) == (
+        [], writer_module.CALENDAR_READ)
+
+
+def test_a_wrapped_envelope_is_still_a_calendar(tmp_path):
+    """Strictness must not become brittleness. Garmin's envelopes have changed
+    shape before, and a body whose rows are one wrapper down is still an
+    answer — refusing it would blank the panel and block every push on an
+    account that works."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    api.listing_payload = {"payload": {"calendarItems": [
+        {"workoutId": 999, "workoutScheduleId": 5000, "calendarDate": SAT,
+         "workoutName": writer_module.marked_workout_name("Threshold", "u1")},
+    ]}}
+
+    rows, status = writer.read_scheduled_rows(*AUG, refresh=True)
+
+    assert status == writer_module.CALENDAR_READ
+    assert [(r["date"], r["workout_id"], r["schedule_id"]) for r in rows] == [
+        (SAT, 999, 5000)]
+    assert writer_module.owns_workout(rows[0]["raw_title"], "u1")
+
+
+def test_a_body_with_no_telling_which_list_is_the_calendar_is_blocked(tmp_path):
+    """Two lists side by side and no known key on either: there is no saying
+    which one is the month, so there is no answer."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    api.listing_payload = {"alpha": [], "beta": []}
+
+    assert writer.read_scheduled_rows(*AUG, refresh=True) == (
+        [], writer_module.CALENDAR_BLOCKED)
+
+
+def test_a_rate_limited_garmin_never_looks_like_a_clear_day(tmp_path):
+    """D6, the consequence that reaches the athlete's Edge.
+
+    A live push record, this app's copy on the calendar, and Garmin answering
+    429 with a 200-shaped body. The adopt guard read that as "nothing is on
+    that day" and uploaded a duplicate.
     """
     store = fresh_store(tmp_path)
     writer, api = writer_for(store)
     push_threshold(writer, store, SAT)
-    workout_id = store.get_push("u1")["workout_id"]
-    store.record_push("u1", schedule_id=None)   # the id we have to recover
-    api.fail_listing = True                     # ...and Garmin will not say
+    store.clear_push("u1")                  # only the local ids are gone
+    writes_before = list(api.writes())
+    api.listing_payload = {"error": "rate limited", "statusCode": 429}
 
-    result = writer.unpush_workout("u1", store=store)
+    second = push_threshold(writer, store, SAT)
 
-    assert result.state == "failed", "a removal that removed nothing said done"
-    assert ("unschedule", 5000) not in api.calls
-    assert api.days() == [SAT], "the copy is still on the calendar"
+    assert len(api.rows_on(SAT)) == 1, (
+        f"a duplicate went to the Edge: {api.rows_on(SAT)}")
+    assert second.state == "failed", (
+        "a rate-limited answer was taken for an empty calendar: "
+        f"{second.action} / {second.state} / {second.reason}")
+    assert api.writes() == writes_before, "a refusal writes nothing at all"
+    told = f"{second.error or ''} {second.reason or ''}"
+    assert SAT in told and "again" in told
+    assert "[ts:" not in told
+
+
+def test_an_unparseable_answer_is_not_cached_as_a_month(tmp_path):
+    """A body that is not an answer must not become a remembered answer: the
+    next read has to go back to Garmin rather than reuse the failure."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    api.listing_payload = {"error": "rate limited", "statusCode": 429}
+    assert writer.read_scheduled_rows(*AUG) == (
+        [], writer_module.CALENDAR_BLOCKED)
+
+    api.listing_payload = _UNSET
+    rows, status = writer.read_scheduled_rows(*AUG)
+
+    assert status == writer_module.CALENDAR_READ
+    assert len(api.listings()) == 2, "the failed answer was cached"
+
+
+# --- D7: a stored id locates a row; only the marker authorises writing on it
+
+
+def _a_row_this_app_did_not_write(store, api, date, name, uid="u1",
+                                  pushed_hash="whatever"):
+    """The athlete's own session on the calendar, and a push record whose ids
+    happen to point at it — a state file restored from another install, an id
+    Garmin reused, a record that outlived the workout it described. Every such
+    record carries a `pushed_hash`, so the store's migration validation passes
+    it through."""
+    theirs = api.upload_workout({"workoutName": name})["workoutId"]
+    api.schedule_workout(theirs, date)
+    row = api.rows_on(date)[-1]
+    store.record_push(uid, workout_id=row["workoutId"],
+                      schedule_id=row["workoutScheduleId"],
+                      scheduled_for=date, pushed_hash=pushed_hash)
+    return row
+
+
+def test_an_update_never_unschedules_a_row_it_cannot_prove_it_wrote(tmp_path):
+    """D7 — the athlete's own session taken off their calendar by a push.
+
+    The removal path was taught that the ids in a push record say where to
+    look and are not themselves permission. The update path was not: a stored
+    schedule id went straight to `unschedule`, so an unmarked "Wednesday club
+    run" answering to that id was removed from the athlete's calendar while
+    the push reported a clean update.
+    """
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    row = _a_row_this_app_did_not_write(store, api, SAT, "Wednesday club run")
+    writes_before = list(api.writes())
+
+    changed = push_threshold(writer, store, SAT, duration_s=5400)
+
+    assert not [c for c in api.calls if c[0] == "unschedule"], (
+        "a session this app cannot prove it wrote was unscheduled")
+    assert api.rows_on(SAT) == [row], "the athlete's own session is gone"
+    assert api.writes() == writes_before, "a refusal writes nothing at all"
+    assert changed.state == "failed", (
+        f"reported a write it had no right to make: {changed.reason}")
     kept = store.get_push("u1")
-    assert kept is not None, "the ids that could still remove it were dropped"
-    assert kept["workout_id"] == workout_id
-    assert kept["push_state"] == "failed"
-    assert "try again" in (result.error or "")
+    assert kept is not None and kept["workout_id"] == row["workoutId"]
+    told = f"{changed.error or ''} {changed.reason or ''}"
+    assert SAT in told and "Garmin Connect" in told, told
+    assert "[ts:" not in told
 
 
-def test_removal_still_clears_when_the_copy_is_genuinely_gone(tmp_path):
-    """The other half of the same branch: the calendar *was* read and holds
-    no copy of ours, so there is nothing to unschedule and forgetting the ids
-    is right. A read that succeeds must not be made pessimistic by the fix."""
+def test_a_move_never_touches_a_row_it_cannot_prove_it_wrote(tmp_path):
+    """D7, the worse half. The reschedule branch unscheduled the stored id
+    *and* re-scheduled that workout id onto the new day, moving a session this
+    app had no evidence it wrote."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    same_content = writer_module.workout_hash(
+        writer_module.build_placeholder_workout(
+            writer_module.marked_workout_name("Threshold 3x12min", "u1"),
+            duration_s=3600))
+    row = _a_row_this_app_did_not_write(store, api, SAT, "Wednesday club run",
+                                        pushed_hash=same_content)
+    writes_before = list(api.writes())
+
+    moved = push_threshold(writer, store, SUN)
+
+    assert api.rows_on(SAT) == [row], "their session was moved off its day"
+    assert api.rows_on(SUN) == [], "their workout was scheduled onto a new day"
+    assert api.writes() == writes_before, "a refusal writes nothing at all"
+    assert moved.state == "failed", (
+        f"moved a session it could not prove it wrote: {moved.reason}")
+    told = f"{moved.error or ''} {moved.reason or ''}"
+    assert "Garmin Connect" in told, told
+
+
+def test_the_write_paths_only_ever_unschedule_a_marked_row(tmp_path):
+    """The positive statement of the same rule: the id that reaches
+    `unschedule` comes off a calendar row carrying this app's marker, not out
+    of the store. Here the store's schedule id points at somebody else's row
+    and ours is elsewhere in the month — the right one still comes off."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT)                  # ours: 999 / 5000
+    theirs = api.upload_workout({"workoutName": "Club chaingang"})["workoutId"]
+    api.schedule_workout(theirs, SAT)                   # theirs: 1000 / 5001
+    store.record_push("u1", schedule_id=5001)           # the store is wrong
+
+    changed = push_threshold(writer, store, SAT, duration_s=5400)
+
+    assert changed.state == "done"
+    assert ("unschedule", 5000) in api.calls
+    assert ("unschedule", 5001) not in api.calls, "removed their session"
+    assert theirs in [r["workoutId"] for r in api.rows_on(SAT)]
+    assert changed.workout_id in [r["workoutId"] for r in api.rows_on(SAT)]
+
+
+def test_a_stored_id_is_not_used_when_another_row_already_answers_to_it(
+        tmp_path):
+    """The stored id is a handle onto a row the marker has already proved is
+    ours. When something else on the calendar is already answering to that id
+    the handle is not ours to pull, whatever the record says."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT)                  # ours: 999 / 5000
+    theirs = api.upload_workout({"workoutName": "Club chaingang"})["workoutId"]
+    api.schedule_workout(theirs, SAT)                   # theirs: 1000 / 5001
+    # Garmin stops exposing schedule ids for our row only, and the record's id
+    # happens to be the one their row answers to.
+    api.calendar[0].pop("workoutScheduleId")
+    store.record_push("u1", schedule_id=5001)
+    writer.invalidate_schedule_cache()
+
+    changed = push_threshold(writer, store, SAT, duration_s=5400)
+
+    assert not [c for c in api.calls if c[0] == "unschedule"]
+    assert changed.state == "failed", (
+        f"pulled an id another session answers to: {changed.reason}")
+    assert theirs in [r["workoutId"] for r in api.rows_on(SAT)]
+
+
+def test_a_move_with_no_template_id_on_the_row_still_lands_as_one_copy(
+        tmp_path):
+    """Our row is provably ours and addressable, but Garmin lists it without
+    the workout id — so there is no template to put back down on the new day.
+    A fresh one goes up and the old row comes off: one copy, not two, and not
+    a refusal either."""
     store = fresh_store(tmp_path)
     writer, api = writer_for(store)
     push_threshold(writer, store, SAT)
-    store.record_push("u1", schedule_id=None)
-    api.calendar.clear()                        # removed in Garmin Connect
+    api.calendar[0].pop("workoutId")        # listed without the template id
+    writer.invalidate_schedule_cache()
 
-    result = writer.unpush_workout("u1", store=store)
+    moved = push_threshold(writer, store, SUN)
 
-    assert result.state == "done"
-    assert store.get_push("u1") is None
+    assert moved.state == "done"
+    assert api.days() == [SUN], f"a copy was left behind: {api.days()}"
+    assert ("unschedule", 5000) in api.calls
+    assert writer_module.owns_workout(api.rows_on(SUN)[0]["title"], "u1")
+
+
+def test_a_move_follows_a_copy_the_athlete_dragged_in_garmin_connect(tmp_path):
+    """The recorded date says which month to read, not which day holds the
+    truth. Dragging our copy to another day in Garmin Connect does not change
+    who wrote it, and the next move must take that copy with it rather than
+    leave it behind as a second session."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT)
+    api.calendar[0]["date"] = "2026-08-05"      # moved in Garmin Connect
+    writer.invalidate_schedule_cache()
+
+    moved = push_threshold(writer, store, SUN)
+
+    assert moved.state == "done"
+    assert api.days() == [SUN], f"a copy was left behind: {api.days()}"
+
+
+# --- D8: a noop may not claim a copy it has not seen -----------------------
+
+
+def test_a_noop_never_claims_a_copy_the_calendar_does_not_hold(tmp_path):
+    """D8 — "job reports success, zero copies on the Edge".
+
+    Push, delete the workout in Garmin Connect, push again. The second push
+    compared the plan against its own push record, saw nothing had changed and
+    answered "Already on Garmin for this date, unchanged" without looking at
+    the calendar at all — while the athlete's calendar held nothing.
+    """
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT)
+    api.calendar.clear()                    # deleted in Garmin Connect
+    api.calls.clear()
+
+    second = push_threshold(writer, store, SAT)
+
+    assert "Already on Garmin" not in (second.reason or ""), (
+        f"claimed a copy that is not there: {second.reason}")
+    assert len(api.rows_on(SAT)) == 1, (
+        "the session reached no calendar at all and the push said so was fine:"
+        f" {second.action} / {second.state} / {second.reason}")
+    assert second.state == "done"
+    assert store.get_push("u1")["workout_id"] == second.workout_id
+    assert writer_module.owns_workout(api.rows_on(SAT)[0]["title"], "u1")
+
+
+def test_a_noop_that_can_see_its_copy_still_skips(tmp_path):
+    """The half that must not be lost: unchanged content, unchanged day, and
+    the copy provably on the calendar is a genuine no-op that writes
+    nothing."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT)
+    writes_before = list(api.writes())
+
+    second = push_threshold(writer, store, SAT)
+
+    assert (second.action, second.state) == ("noop", "skipped")
+    assert api.writes() == writes_before, "a no-op wrote to Garmin"
+    assert len(api.rows_on(SAT)) == 1
+    assert SAT in (second.reason or ""), second.reason
+    assert second.workout_id == 999 and second.schedule_id == 5000
+
+
+def test_a_noop_that_cannot_read_the_calendar_says_so_instead_of_claiming(
+        tmp_path):
+    """An unreadable calendar is not evidence the copy is there. Nothing is
+    written either way, so this is not a refusal — it is a claim the module
+    may not make, and the athlete is told which."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT)
+    writes_before = list(api.writes())
+    api.listing_payload = {"error": "rate limited", "statusCode": 429}
+
+    second = push_threshold(writer, store, SAT)
+
+    assert second.state == "skipped" and second.action == "noop"
+    assert api.writes() == writes_before, "a no-op wrote to Garmin"
+    assert "Already on" not in (second.reason or ""), second.reason
+    assert "couldn't" in (second.reason or "").lower(), second.reason
+    assert store.get_push("u1")["push_state"] == "scheduled"
+
+
+def test_a_noop_leaves_a_copy_the_athlete_moved_where_they_put_it(tmp_path):
+    """Our copy is on the calendar, just not on the recorded day. It is still
+    on the calendar, so nothing is sent — and the reason says where it is
+    rather than claiming the recorded day."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT)
+    api.calendar[0]["date"] = "2026-08-05"      # moved in Garmin Connect
+    writes_before = list(api.writes())
+
+    second = push_threshold(writer, store, SAT)
+
+    assert second.state == "skipped"
+    assert api.writes() == writes_before, "a second copy was sent"
+    assert "2026-08-05" in (second.reason or ""), second.reason
+
+
+def test_a_dry_run_noop_touches_nothing(tmp_path):
+    """The verification the no-op now does is a read, and dry_run does not
+    read either. A preview says what it would send and reaches nothing."""
+    store = fresh_store(tmp_path)
+    writer, api = writer_for(store)
+    push_threshold(writer, store, SAT)
+    api.calls.clear()
+
+    preview = push_threshold(writer, store, SAT, dry_run=True)
+
+    assert (preview.action, preview.state) == ("noop", "skipped")
+    assert preview.dry_run is True
+    assert api.calls == [], f"dry run touched Garmin: {api.calls}"
 
 
 # --- ROOT CAUSE: a calendar that did not answer is not an empty calendar ----
@@ -611,7 +1012,7 @@ def test_a_session_level_failure_is_not_a_blocked_month(tmp_path, monkeypatch):
     with pytest.raises(writer_module.GarminNotConfigured):
         writer.find_owned_scheduled("u1", SAT)
     with pytest.raises(writer_module.GarminNotConfigured):
-        writer.locate_previous_copy("u1", 999, SAT)
+        writer.locate_owned_copies("u1", 999, 5000, SAT)
     assert api.calls == [], "a session-level failure reached the network"
 
 
@@ -694,177 +1095,3 @@ def test_a_dry_run_create_touches_nothing_even_with_the_calendar_down(
     assert preview.action == "create" and preview.state == "pending"
     assert preview.dry_run is True
     assert api.calls == [], f"dry run touched Garmin: {api.calls}"
-
-
-# --- DEFECT D3: removal proves ownership, or removes nothing ---------------
-
-
-def _inherited_record_pointing_at(store, api, date, name, uid="u1"):
-    """Somebody else's session on the calendar and a push record that claims
-    it — a state file restored from another install, an id reused, a record
-    that outlived the workout it described."""
-    theirs = api.upload_workout({"workoutName": name})["workoutId"]
-    api.schedule_workout(theirs, date)
-    row = api.rows_on(date)[-1]
-    store.record_push(uid, workout_id=row["workoutId"],
-                      schedule_id=row["workoutScheduleId"],
-                      scheduled_for=date, pushed_hash="whatever")
-    return row
-
-
-def test_removal_refuses_a_session_it_cannot_prove_it_wrote(tmp_path):
-    """D3 — the athlete's own session, removed from their calendar.
-
-    The removal path unscheduled whatever id the store held and proved
-    nothing against the calendar, while its docstring claimed ownership was
-    proved the way a push proves it. A push proves it with the marker it
-    wrote into the name; a hand-built "Sunday club run" carries none, so it
-    is not ours to take off anybody's calendar.
-    """
-    store = fresh_store(tmp_path)
-    writer, api = writer_for(store)
-    row = _inherited_record_pointing_at(store, api, SUN, "Sunday club run")
-
-    result = writer.unpush_workout("u1", store=store)
-
-    assert result.state == "failed", (
-        f"someone else's session was removed and reported: {result.reason}")
-    assert not [c for c in api.calls if c[0] == "unschedule"]
-    assert api.rows_on(SUN) == [row], "the athlete's own session is gone"
-    assert store.get_push("u1") is not None, "the record was dropped anyway"
-    told = f"{result.error or ''} {result.reason or ''}"
-    assert "Garmin Connect" in told, f"no way out offered: {told}"
-    assert SUN in told
-
-
-def test_removal_proves_ownership_against_the_calendar_not_the_stored_id(
-        tmp_path):
-    """The stored schedule id is a memory, not evidence. When it points at a
-    row that is not ours the removal must find *our* row by its marker and
-    take that off instead — one session removed, and the right one."""
-    store = fresh_store(tmp_path)
-    writer, api = writer_for(store)
-    push_threshold(writer, store, SAT)                  # ours: 999 / 5000
-    theirs = api.upload_workout({"workoutName": "Club chaingang"})["workoutId"]
-    api.schedule_workout(theirs, SAT)                   # theirs: 1000 / 5001
-    store.record_push("u1", schedule_id=5001)           # the store is wrong
-
-    result = writer.unpush_workout("u1", store=store)
-
-    assert result.state == "done"
-    assert ("unschedule", 5000) in api.calls, "our copy stayed on the calendar"
-    assert ("unschedule", 5001) not in api.calls
-    assert [r["workoutId"] for r in api.rows_on(SAT)] == [theirs]
-    assert store.get_push("u1") is None
-
-
-def test_removal_finds_a_copy_the_athlete_moved_in_garmin_connect(tmp_path):
-    """The recorded date says which month to read, not which day is the whole
-    truth. Dragging the session to another day in Garmin Connect changes
-    nothing about who wrote it, and Remove has to keep working afterwards."""
-    store = fresh_store(tmp_path)
-    writer, api = writer_for(store)
-    push_threshold(writer, store, SAT)
-    api.calendar[0]["date"] = SUN               # moved in Garmin Connect
-    writer.invalidate_schedule_cache()
-
-    result = writer.unpush_workout("u1", store=store)
-
-    assert result.state == "done"
-    assert result.reason == "Removed from your Garmin calendar."
-    assert api.calendar == [], "the copy was left behind on the day it moved to"
-    assert store.get_push("u1") is None
-
-
-def test_removal_takes_off_every_copy_it_wrote_that_day(tmp_path):
-    """Clearing the push record forgets every id it held, so a removal that
-    leaves a second copy of ours behind orphans it for good."""
-    store = fresh_store(tmp_path)
-    writer, api = writer_for(store)
-    push_threshold(writer, store, SAT)
-    marked = writer_module.marked_workout_name("Threshold 3x12min", "u1")
-    twin = api.upload_workout({"workoutName": marked})["workoutId"]
-    api.schedule_workout(twin, SAT)                     # the duplicate
-
-    result = writer.unpush_workout("u1", store=store)
-
-    assert result.state == "done"
-    assert api.rows_on(SAT) == [], f"a copy of ours was orphaned: {api.rows_on(SAT)}"
-    assert store.get_push("u1") is None
-
-
-# --- DEFECT D1: a removal that removed nothing never reports success -------
-
-
-def test_removal_with_no_date_refuses_even_while_holding_a_schedule_id(
-        tmp_path):
-    """D1, third path. No date on the push record means no month to read and
-    nothing to prove ownership against, and the stored id alone has already
-    been shown to be worth nothing. Refuse and keep the ids."""
-    store = fresh_store(tmp_path)
-    writer, api = writer_for(store)
-    push_threshold(writer, store, SAT)
-    store.record_push("u1", scheduled_for=None)
-    assert store.get_push("u1")["schedule_id"] == 5000, "precondition"
-
-    result = writer.unpush_workout("u1", store=store)
-
-    assert result.state == "failed", (
-        f"reported a removal it could not have made: {result.reason}")
-    assert not [c for c in api.calls if c[0] == "unschedule"]
-    assert api.days() == [SAT], "the copy is still on the calendar"
-    kept = store.get_push("u1")
-    assert kept is not None and kept["workout_id"] == 999
-    assert kept["schedule_id"] == 5000, "the id that could remove it was dropped"
-
-
-def test_removal_refuses_when_the_listing_hides_the_schedule_id(tmp_path):
-    """D1, second path. Garmin lists the copy but not the id that would take
-    it off. Nothing can be removed, so nothing may be reported removed —
-    least of all by throwing away the workout id as well."""
-    store = fresh_store(tmp_path)
-    writer, api = writer_for(store)
-    _push_without_a_schedule_id(writer, store, api)
-
-    result = writer.unpush_workout("u1", store=store)
-
-    assert result.state == "failed"
-    assert not [c for c in api.calls if c[0] == "unschedule"]
-    assert len(api.rows_on(SAT)) == 1
-    assert store.get_push("u1") is not None
-    assert "try again" in (result.error or "")
-
-
-def test_removal_that_removed_nothing_says_so_rather_than_done(tmp_path):
-    """The reason string is what the athlete reads. "Removed from your Garmin
-    calendar" is a claim about the calendar, and it may only be made when a
-    row actually came off it."""
-    store = fresh_store(tmp_path)
-    writer, api = writer_for(store)
-    push_threshold(writer, store, SAT)
-    api.calendar.clear()                    # removed in Garmin Connect
-
-    result = writer.unpush_workout("u1", store=store)
-
-    assert result.state == "done"
-    assert not [c for c in api.calls if c[0] == "unschedule"]
-    assert store.get_push("u1") is None
-    assert "Removed from your Garmin calendar." != result.reason
-    assert "already" in (result.reason or "").lower(), result.reason
-
-
-def test_removal_still_removes_the_copy_it_can_prove_it_wrote(tmp_path):
-    """The path that must keep working, untouched by all of the above."""
-    store = fresh_store(tmp_path)
-    writer, api = writer_for(store)
-    push_threshold(writer, store, SAT)
-
-    result = writer.unpush_workout("u1", store=store)
-
-    assert (result.state, result.action) == ("done", "unschedule")
-    assert result.reason == "Removed from your Garmin calendar."
-    assert result.workout_id == 999 and result.schedule_id == 5000
-    assert ("unschedule", 5000) in api.calls
-    assert api.calendar == []
-    assert store.get_push("u1") is None
-    assert 999 in api.templates, "the template is never destroyed"
