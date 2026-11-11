@@ -130,6 +130,20 @@ body.fblue .ai .badge.b-info{background:#fff}
 .fswitch button{border:0;background:none;color:#fff;border-radius:999px;padding:3px 10px;font-size:11.5px;font-weight:700}
 .fswitch button.on{background:#fff;color:var(--ink)}
 .fswitch i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+/* rep scorecard: gauge + KPI bars */
+.gauge{display:block;width:100%;max-width:230px;margin:6px auto 0;overflow:visible}
+.gauge .g-fill{animation:gFill 1.1s cubic-bezier(.2,.8,.2,1) both}
+.gauge .g-needle{transform-origin:100px 100px;transform:rotate(var(--a));animation:gNeedle 1.1s cubic-bezier(.2,.8,.2,1) both}
+@keyframes gFill{from{stroke-dasharray:0 100}}
+@keyframes gNeedle{from{transform:rotate(0deg)}}
+.kbar{margin-top:12px}
+.kbar-h{display:flex;justify-content:space-between;gap:8px;font-size:13px;font-weight:650;margin-bottom:6px}
+.kbar-t{height:12px;border-radius:6px;background:var(--blue);overflow:hidden}
+.kbar-t i{display:block;height:100%;background:var(--lime);border-radius:6px 0 0 6px;animation:kGrow 1s cubic-bezier(.2,.8,.2,1) both}
+.kbar-t i[style="width:100%"]{border-radius:6px}
+.kbar small{display:block;margin-top:4px;font-size:11.5px;font-weight:650}
+@keyframes kGrow{from{width:0}}
+@media (prefers-reduced-motion:reduce){.gauge .g-fill,.gauge .g-needle,.kbar-t i{animation:none}}
 /* KPI strip */
 .kpis{display:grid;grid-template-columns:repeat(var(--n,5),minmax(0,1fr));margin-bottom:16px}
 .kpi{padding:18px 20px;border-left:1px solid var(--line);display:flex;flex-direction:column;gap:6px;min-width:0}
@@ -1306,6 +1320,15 @@ function ensureExtra(){
     .map(([name,slug,visits,conv,status],i)=>({id:'LP'+(i+1),name,slug,visits,conv,status}));
   save();
 }
+const REP_KPI={'Kyle Mason':{visits:6,revenue:8000},'James Okoro':{visits:8,revenue:10000},'Priya Shah':{visits:4,revenue:4000},'Sarah Lin':{visits:4,revenue:4000}};
+function gauge(pct,target){const id=uid('gg'),p=Math.max(0,Math.min(100,pct)),a=p*1.8,ta=Math.PI*(1-target/100),tx=100+Math.cos(ta)*78,ty=100-Math.sin(ta)*78,tx2=100+Math.cos(ta)*100,ty2=100-Math.sin(ta)*100;
+  return `<svg class="gauge" viewBox="0 0 200 112" role="img" aria-label="Compliance ${p}% against a ${target}% target"><defs><linearGradient id="${id}" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#9EF7F5"/><stop offset=".55" stop-color="#5170FF"/><stop offset="1" stop-color="#2F45CF"/></linearGradient></defs>
+    <path d="M22 100A78 78 0 0 1 178 100" fill="none" stroke="#E9EEFF" stroke-width="20" stroke-linecap="round"/>
+    <path class="g-fill" d="M22 100A78 78 0 0 1 178 100" fill="none" stroke="url(#${id})" stroke-width="20" stroke-linecap="round" pathLength="100" stroke-dasharray="${p} 100" style="--p:${p}"/>
+    <line x1="${tx}" y1="${ty}" x2="${tx2}" y2="${ty2}" stroke="#0B0B0B" stroke-width="3" stroke-linecap="round" transform="translate(${(tx-tx2)*.22} ${(ty-ty2)*.22})"/>
+    <g class="g-needle" style="--a:${a}deg"><path d="M44 100L100 93.5L100 106.5Z" fill="#0B0B0B"/><circle cx="100" cy="100" r="9" fill="#0B0B0B"/><circle cx="100" cy="100" r="3.5" fill="#fff"/></g></svg>`;}
+function kpiBar(label,val,target,f){const pct=Math.min(100,val/Math.max(1,target)*100),hit=val>=target;
+  return `<div class="kbar" data-tip="${esc(label)} · <b>${esc(f(val))}</b> of ${esc(f(target))} target"><div class="kbar-h"><span>${esc(label)}</span><b class="num">${esc(f(val))} <span class="muted" style="font-weight:650">/ ${esc(f(target))}</span></b></div><div class="kbar-t" role="img" aria-label="${esc(label)}: ${esc(f(val))} of ${esc(f(target))}"><i style="width:${pct}%"></i></div><small class="muted">${hit?'Target reached':esc(f(target-val))+' to go'}</small></div>`;}
 function cadDue(cid){const cd=DB.cad[cid];return Math.round((D(cd.lastVisit).getTime()+cd.eff*7*864e5-TODAY.getTime())/864e5);}
 const cadStatus=cid=>{const d=cadDue(cid);return d<0?'Overdue':d<=7?'Due soon':'On track';};
 const isMissing=cid=>{const cd=DB.cad[cid];return ago(cd.lastOrder)>cd.orderEvery*1.5;};
@@ -1355,9 +1378,15 @@ function pCadence(tab){ensureExtra();
       cols:[{h:'Account',v:c=>`<span class="link">${esc(c.name)}</span><br><span class="muted" style="font-size:12px">${esc(c.phone)}</span>`,sv:c=>c.name},{h:'Rep',v:c=>repAv(c.rep)},{h:'Usually orders',v:c=>'every '+DB.cad[c.id].orderEvery+' days'},{h:'Last order',v:c=>`${ago(DB.cad[c.id].lastOrder)} days ago`,sv:c=>ago(DB.cad[c.id].lastOrder)},{h:'Expected value',r:1,v:c=>`<span class="strong num">${money(DB.cad[c.id].avgOrder,0)}</span>`,sv:c=>DB.cad[c.id].avgOrder},{h:'Status',v:c=>DB.calls.some(x=>x.cust===c.id)?badge('Done'):badge('Call due')},{h:'',v:c=>`<button class="pill sm" data-act="log-call" data-id="${c.id}">${ic('phone')}Log call</button>`}],
       bulk:[['Assign to rep','soon'],['Add to call list','soon']]});
   }
-  // reps
-  return head+`<div class="grid g4">${REPS.map(r=>{const cs=DB.customers.filter(c=>c.rep===r),v=DB.visits.filter(x=>x.rep===r),comp=cs.length?Math.round(cs.filter(c=>cadStatus(c.id)!=='Overdue').length/cs.length*100):100,rev=sum(DB.orders.filter(o=>o.rep===r&&ago(o.date)<30&&o.status!=='Cancelled'),o=>docTotal(o.lines).sub),q=DB.quotes.filter(x=>x.rep===r),won=q.filter(x=>x.status==='Accepted').length,lost=q.filter(x=>['Declined','Expired'].includes(x.status)).length;
-    return `<section class="card ${comp<90?'tq':''}">${cardH('','<span style="display:flex;gap:10px;align-items:center">'+repAv(r)+esc(r)+'</span>',cs.length+' accounts')}<div class="card-b"><div class="bignum num" style="padding:0 0 10px">${comp}%<span style="font-size:16px"> compliance</span></div><dl class="kv"><dt>Visits this week</dt><dd>${v.filter(x=>x.status==='Visited').length} / ${v.length}</dd><dt>Missed</dt><dd>${v.filter(x=>x.status==='Missed').length}</dd><dt>Revenue (30 days)</dt><dd>${kmoney(rev)}</dd><dt>Quote win rate</dt><dd>${Math.round(won/Math.max(1,won+lost)*100)}%</dd><dt>Missing orders</dt><dd>${cs.filter(c=>isMissing(c.id)).length}</dd></dl></div></section>`;}).join('')}</div>`;
+  // reps — white scorecards: compliance gauge + KPI bars (lime = achieved, blue = remaining to target)
+  return head+`<p class="muted" style="font-weight:650;margin:-6px 0 14px">Gauge = accounts visited on cadence (black tick = 90% target). Bars: lime = achieved, electric blue = still to go to the KPI.</p><div class="grid g4">${REPS.map(r=>{const cs=DB.customers.filter(c=>c.rep===r),v=DB.visits.filter(x=>x.rep===r),comp=cs.length?Math.round(cs.filter(c=>cadStatus(c.id)!=='Overdue').length/cs.length*100):100,rev=sum(DB.orders.filter(o=>o.rep===r&&ago(o.date)<30&&o.status!=='Cancelled'),o=>docTotal(o.lines).sub),q=DB.quotes.filter(x=>x.rep===r),won=q.filter(x=>x.status==='Accepted').length,lost=q.filter(x=>['Declined','Expired'].includes(x.status)).length;
+    const k=REP_KPI[r],done=v.filter(x=>x.status==='Visited').length;
+    return `<section class="card">${cardH('','<span style="display:flex;gap:10px;align-items:center">'+repAv(r)+esc(r)+'</span>',cs.length+' accounts')}<div class="card-b">
+      ${gauge(comp,90)}
+      <div style="text-align:center;margin:10px 0 14px"><div class="num" style="font-size:34px;font-weight:600;letter-spacing:-.02em;line-height:1">${comp}%</div><div class="muted" style="font-weight:650;font-size:12.5px">cadence compliance ${comp>=90?badge('On track'):badge('Due soon').replace('Due soon','Below target')}</div></div>
+      ${kpiBar('Visits this week',done,k.visits,x=>x+(x===1?' visit':' visits'))}
+      ${kpiBar('Revenue (30 days)',Math.round(rev),k.revenue,x=>kmoney(x))}
+      <dl class="kv" style="margin-top:14px"><dt>Planned this week</dt><dd>${v.length}</dd><dt>Missed</dt><dd>${v.filter(x=>x.status==='Missed').length}</dd><dt>Quote win rate</dt><dd>${Math.round(won/Math.max(1,won+lost)*100)}%</dd><dt>Missing orders</dt><dd>${cs.filter(c=>isMissing(c.id)).length}</dd></dl></div></section>`;}).join('')}</div>`;
 }
 
 /* ---------- Marketing ---------- */
