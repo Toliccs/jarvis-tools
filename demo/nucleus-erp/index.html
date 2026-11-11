@@ -621,7 +621,7 @@ function areaChart(o){
   return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(o.aria||'Area chart')}">${s}</svg>`;
 }
 function barChart(o){
-  const W=o.w||460,H=o.h||210,pl=o.pl||34,pr=8,pt=30,pb=26,v=o.values,n=v.length,ints=v.every(Number.isInteger),max=ints&&Math.max(...v)<=12?Math.max(3,Math.ceil(Math.max(...v)*1.05/3)*3):niceMax(Math.max(...v)*1.05),f=o.fmt||(x=>x),hi=o.hi??n-1,bw=(W-pl-pr)/n,gap=Math.max(4,bw*.22);
+  const W=o.w||460,H=o.h||210,pl=o.pl||34,pr=8,pt=30,pb=26,v=o.values,n=v.length,ints=v.every(Number.isInteger),max=(()=>{const st=niceMax(Math.max(...v,ints?1:0.01)*1.05/3);return ints?Math.max(3,Math.ceil(st)*3):st*3;})(),f=o.fmt||(x=>x),hi=o.hi??n-1,bw=(W-pl-pr)/n,gap=Math.max(4,bw*.22);
   let s='';
   for(let k=0;k<=3;k++){const val=max*k/3,y=pt+(H-pt-pb)*(1-k/3);s+=`<line x1="${pl}" x2="${W-pr}" y1="${y}" y2="${y}" stroke="${k?C.grid:C.axis}"/><text class="axis" x="${pl-8}" y="${y+4}" text-anchor="end">${(o.axisFmt||(x=>Math.round(x*10)/10))(val)}</text>`;}
   const every=Math.ceil(n/8);
@@ -1222,9 +1222,9 @@ let waveRAF;
 function initWaves(){cancelAnimationFrame(waveRAF);const cvs=$$('canvas.wave');if(!cvs.length)return;const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;const dpr=devicePixelRatio||1;
   const st=cvs.map(cv=>({cv,b:[]}));
   const size=()=>st.forEach(o=>{const r=o.cv.getBoundingClientRect();o.cv.width=r.width*dpr;o.cv.height=r.height*dpr;o.w=o.cv.width;o.h=o.cv.height;
-    o.b=Array.from({length:16},(_,i)=>mk(o,true));});
-  const mk=(o,init)=>{const r=(4+Math.random()**2*24)*dpr;const b={x:o.w*(.05+Math.random()*.9),y:init?o.h*(.15+Math.random()*.6):o.h*.62+r,r,v:(.15+Math.random()*.35)*dpr,ph:Math.random()*6.28,a:0,y0:0,blue:Math.random()<.22};b.y0=b.y+(init?60*dpr:0);return b;};
-  const bubble=(c,b)=>{c.globalAlpha=b.a*(b.blue?.9:.95);c.fillStyle=b.blue?'#5170FF':'#FFFFFF';c.beginPath();c.arc(b.x,b.y,b.r,0,7);c.fill();c.globalAlpha=1;};
+    o.b=Array.from({length:24},(_,i)=>mk(o,true));});
+  const mk=(o,init)=>{const r=(2+Math.random()**2*9)*dpr;const b={x:o.w*(.05+Math.random()*.9),y:init?o.h*(.15+Math.random()*.6):o.h*.62+r,r,v:(.15+Math.random()*.35)*dpr,ph:Math.random()*6.28,a:0,y0:0,c:['#5170FF','#4A63F0','#3D55E0','#6E89FF','#8FA3FF','#AFC0FF'][Math.floor(Math.random()*6)]};b.y0=b.y+(init?60*dpr:0);return b;};
+  const bubble=(c,b)=>{c.globalAlpha=b.a*.9;c.fillStyle=b.c;c.beginPath();c.arc(b.x,b.y,b.r,0,7);c.fill();c.globalAlpha=1;};
   size();
   const draw=()=>{st.forEach(o=>{const c=o.cv.getContext('2d');c.clearRect(0,0,o.w,o.h);
     const top=o.h*.07;
@@ -1233,6 +1233,187 @@ function initWaves(){cancelAnimationFrame(waveRAF);const cvs=$$('canvas.wave');i
       if(b.y<top)o.b[i]=mk(o,false);bubble(c,b);});});
     if(!reduce)waveRAF=requestAnimationFrame(draw);};
   draw();window.onresize=()=>{size();if(reduce)draw();};}
+
+/* =====================================================================
+   SALES CADENCE + MARKETING (added screens)
+   ===================================================================== */
+P.cal='<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>';
+P.mega='<path d="M3 11v2a1 1 0 0 0 1 1h2l5 4V6L6 10H4a1 1 0 0 0-1 1z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/>';
+P.phone='<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/>';
+TONE.good.push('On track','Visited','Order taken','Live','Published','Sending');
+TONE.info.push('Planned','Scheduled campaign','Flow');
+TONE.crit.push('Missed','Paused');
+TONE.warn.push('Call due');
+NAV.splice(3,0,['cadence','Sales cadence','cal']);
+NAV.splice(NAV.findIndex(n=>n[0]==='ecommerce')+1,0,['marketing','Marketing','mega']);
+SECTION_OF.campaign='marketing';
+const REPS=['Kyle Mason','James Okoro','Priya Shah','Sarah Lin'];
+const REPCOL={'Kyle Mason':['#E3E9FF','#1F3BCC'],'James Okoro':['#DCF2E2','#0B4A1F'],'Priya Shah':['#FFF1B8','#4A3B00'],'Sarah Lin':['#FBE1DE','#8A1F17']};
+const initials=n=>n.split(' ').map(x=>x[0]).join('');
+const repAv=n=>`<span class="av" style="width:26px;height:26px;font-size:10.5px;background:${REPCOL[n][0]};color:${REPCOL[n][1]}" title="${esc(n)}">${initials(n)}</span>`;
+const DAYS=['Mon','Tue','Wed','Thu','Fri'];
+const WEEK0=new Date(2026,10,9); // Monday of current week
+const dayDate=i=>new Date(WEEK0.getTime()+i*864e5);
+const TODAY_IDX=2;
+
+function ensureExtra(){
+  if(DB.cad&&DB.campaigns){DB.customers.forEach(c=>{if(!DB.cad[c.id])DB.cad[c.id]={sug:4,eff:4,lastVisit:TODAY.toISOString(),visits90:0,orderEvery:30,lastOrder:TODAY.toISOString(),avgOrder:500};});return;}
+  const R=rngFactory(4242),pick=a=>a[Math.floor(R()*a.length)],ri=(a,b)=>a+Math.floor(R()*(b-a+1));
+  DB.cad={};
+  DB.customers.forEach((c,i)=>{const sug=pick([1,2,2,2,4,4,4,6,8]),eff=R()<.18?pick([1,2,4]):sug;
+    const lastV=Math.max(0,Math.round(eff*7*(R()*1.6)));const st=custStats(c);
+    DB.cad[c.id]={sug,eff,lastVisit:daysAgo(lastV).toISOString(),visits90:ri(1,12),orderEvery:pick([7,14,14,21,30]),lastOrder:st.last||daysAgo(ri(25,80)).toISOString(),avgOrder:st.orders?st.rev/st.orders:ri(350,1400)};});
+  DB.visits=[];let vid=1;
+  DB.customers.forEach(c=>{const cd=DB.cad[c.id];const due=cadDue(c.id);if(due<=9&&R()<.85){const day=Math.max(0,Math.min(4,Math.round(TODAY_IDX+due/2+(R()-.5)*3)));
+    const status=day<TODAY_IDX?(R()<.82?'Visited':'Missed'):'Planned';DB.visits.push({id:'V'+(vid++),cust:c.id,rep:c.rep,day,time:pick(['8:30','9:15','10:00','11:00','13:30','14:15','15:00']),status,outcome:status==='Visited'?pick(['Order taken','Order taken','No order','Quote requested']):''});}});
+  DB.calls=[];
+  const CH=['Google Ads','Meta Ads','Email','LinkedIn','SEO','Trade show','Referral'];
+  DB.campaigns=[
+    ['Winter Prep Kit launch','Meta Ads','Live',4000,2860,61,9,14],['Wiper season — trade','Google Ads','Live',3500,2410,48,11,21],['Fleet service bundles','LinkedIn','Live',2500,1780,22,4,10],
+    ['Spring workshop expo','Trade show','Completed',6000,5920,88,14,45],['Halo wiper retargeting','Meta Ads','Paused',1500,1120,19,3,22],['Brake refresh promo','Google Ads','Completed',2000,1980,37,8,32],
+    ['Oil change reminder flow','Email','Live',300,180,54,17,12],['New-account welcome','Email','Live',200,90,31,12,8],['Black Friday trade deals','Email','Scheduled campaign',800,0,0,0,-12],['SEO — service kit guides','SEO','Live',1200,900,40,6,60],
+  ].map(([name,ch,status,budget,spend,leads,custs,startAgo],i)=>{const rev=Math.round(custs*ri(600,2400));return {id:'CMP'+(101+i),k:'CMP'+(101+i),name,ch,status,budget,spend,leads,custs,rev,clicks:Math.round(leads*ri(9,22)),impr:Math.round(leads*ri(400,1400)),start:daysAgo(startAgo).toISOString(),end:daysAgo(startAgo-ri(20,45)).toISOString(),owner:pick(['Marketing','Morgan Lee'])};});
+  DB.emails=[['November trade newsletter','Campaign','Sent',2140,41.2,4.8,3820],['Winter prep — 15% off kits','Campaign','Sent',2088,38.6,6.1,6240],['Abandoned quote follow-up','Flow','Live',312,55.1,12.4,9180],['Oil change reminder','Flow','Live',864,48.9,9.7,7420],['Welcome series (3 emails)','Flow','Live',188,62.3,14.2,2310],['Win-back: lapsed accounts','Flow','Live',146,33.4,5.2,1980],['Black Friday trade deals','Campaign','Scheduled campaign',2205,0,0,0],['October trade newsletter','Campaign','Sent',2101,39.8,4.1,3110]]
+    .map(([name,type,status,sent,open,click,rev],i)=>({id:'EM'+(i+1),name,type,status,sent,open,click,rev,date:daysAgo(i*5+1).toISOString()}));
+  DB.lists=[['All trade customers','List',1862,4.2,'Nucleus CRM'],['Fleet accounts','Segment',214,2.1,'Nucleus CRM'],['Lapsed 90+ days','Segment',148,-3.4,'Order history'],['Newsletter subscribers','List',3420,6.8,'Signup forms'],['Workshop expo leads','List',412,0,'Trade show'],['High value (>$10k / yr)','Segment',96,1.2,'Order history']]
+    .map(([name,type,count,growth,source],i)=>({id:'L'+(i+1),name,type,count,growth,source}));
+  DB.pages=[['Winter Prep Kit','/winter-kit',4210,6.8,'Published'],['Trade account application','/trade',2980,11.4,'Published'],['Fleet service bundles','/fleet',1340,4.9,'Published'],['Halo wiper finder','/wipers',6120,3.2,'Published'],['Black Friday 2026','/black-friday',0,0,'Draft']]
+    .map(([name,slug,visits,conv,status],i)=>({id:'LP'+(i+1),name,slug,visits,conv,status}));
+  save();
+}
+function cadDue(cid){const cd=DB.cad[cid];return Math.round((D(cd.lastVisit).getTime()+cd.eff*7*864e5-TODAY.getTime())/864e5);}
+const cadStatus=cid=>{const d=cadDue(cid);return d<0?'Overdue':d<=7?'Due soon':'On track';};
+const isMissing=cid=>{const cd=DB.cad[cid];return ago(cd.lastOrder)>cd.orderEvery*1.5;};
+const weeksTxt=w=>w===1?'Weekly':w===2?'Fortnightly':'Every '+w+' weeks';
+
+/* ---------- Sales cadence ---------- */
+const CAD_TABS=[['overview','Overview'],['planner','Visit planner'],['missing','Missing orders'],['reps','Rep scorecard']];
+function pCadence(tab){ensureExtra();
+  const head=crumbs([['Sales cadence','#cadence'],[CAD_TABS.find(t=>t[0]===tab)[1]]])+phead('Sales cadence',`<nav class="seg" aria-label="Rep">${['All reps',...REPS].map((r,i)=>`<button class="${(LS.cadRep||'All reps')===r?'on':''}" data-act="cad-rep" data-r="${r}">${r==='All reps'?r:r.split(' ')[0]}</button>`).join('')}</nav>${btn('Auto-plan week','cad-autoplan','lime','sparkle')}`)+subnav('cadence',CAD_TABS,tab);
+  const rep=LS.cadRep&&LS.cadRep!=='All reps'?LS.cadRep:null;
+  const custs=DB.customers.filter(c=>!rep||c.rep===rep), vis=DB.visits.filter(v=>!rep||v.rep===rep);
+  const over=custs.filter(c=>cadStatus(c.id)==='Overdue'),soon=custs.filter(c=>cadStatus(c.id)==='Due soon'),onT=custs.filter(c=>cadStatus(c.id)==='On track');
+  const missing=custs.filter(c=>isMissing(c.id));
+  if(tab==='overview'){
+    const wk=[...Array(10)].map((_,i)=>i===9?vis.filter(v=>v.status==='Visited').length:Math.round((rep?6:22)+Math.sin(i*1.3)*4+((i*7)%5)));
+    const wl=[...Array(10)].map((_,i)=>'Wk of '+fshort(new Date(WEEK0.getTime()-(9-i)*7*864e5).toISOString()));
+    const byRep=REPS.map(r=>{const cs=DB.customers.filter(c=>c.rep===r);return [r,cs.length?Math.round(cs.filter(c=>cadStatus(c.id)!=='Overdue').length/cs.length*100):100,cs.length];});
+    return head+kpiStrip([
+      {l:'Cadence compliance',v:Math.round((onT.length+soon.length)/Math.max(1,custs.length)*100)+'%',d:'+5 pts'},
+      {l:'Visits this week',v:`${vis.filter(v=>v.status==='Visited').length} / ${vis.length}`,sub:'done / planned'},
+      {l:'Overdue accounts',v:over.length,d:'need a visit',dir:'down'},
+      {l:'Due in 7 days',v:soon.length,sub:'plan them this week'},
+      {l:'Missing orders',v:missing.length,sub:kmoney(sum(missing,c=>DB.cad[c.id].avgOrder))+' at risk'},
+    ])+
+    `<div class="grid g3">${aiCard('AI Cadence Planner',[
+      ['ACT',`${over.length} accounts are overdue for a visit. ${over.filter(c=>!DB.visits.some(v=>v.cust===c.id&&v.status==='Planned')).length} have no visit planned. <a href="#cadence-planner">Auto-plan →</a>`],
+      ['RISK',`${missing.length} accounts haven't ordered when they usually would. <a href="#cadence-missing">Open call list →</a>`],
+      ['WIN',`Visited accounts ordered ${Math.round(1.6*10)/10}× more often than unvisited ones in the last 90 days.`]],'Ask: who should Kyle see tomorrow?')}
+      <section class="card">${cardH('chart','Visits completed','per week · last 10 weeks')}<div class="bignum num">${wk[9]}<span> this week</span></div><div style="padding:6px 12px 14px">${barChart({values:wk,labels:wl,short:wl.map((l,i)=>i===9?'This wk':l.replace('Wk of ','').split(' ')[0]),aria:'Visits per week'})}</div></section>
+      <section class="card">${cardH('pie','Account cadence status',custs.length+' accounts')}<div class="card-b">${donut([{k:'On track',n:onT.length,c:DONUT_STEPS[0]},{k:'Due soon',n:soon.length,c:DONUT_STEPS[1]},{k:'Overdue',n:over.length,c:DONUT_STEPS[3]}],Math.round((onT.length+soon.length)/Math.max(1,custs.length)*100)+'%','compliant')}</div></section></div>
+    <div class="grid g12"><section class="card tq">${cardH('users','Compliance by rep','accounts visited on cadence')}<div class="card-b">${byRep.map(([r,p,n])=>`<div class="hbar"><span>${esc(r)}<br><small class="muted" style="font-weight:600">${n} accounts</small></span><div class="track"><div class="fill" style="width:${p}%"></div><div class="target" style="left:90%"></div></div><span class="v num">${p}%</span></div>`).join('')}<p class="muted" style="font-weight:600;font-size:12px;margin:10px 2px 0">Red tick = 90% target</p></div></section>
+    <div>${listCard({key:'cadacc',rows:()=>DB.customers.filter(c=>!rep||c.rep===rep),href:c=>'#customer-'+c.id,ph:'Search account, rep',text:c=>`${c.name} ${c.rep} ${c.city}`,sort:4,dir:1,
+      tabs:[['over','Overdue',c=>cadStatus(c.id)==='Overdue'],['soon','Due soon',c=>cadStatus(c.id)==='Due soon'],['ok','On track',c=>cadStatus(c.id)==='On track']],
+      rowCls:c=>cadStatus(c.id)==='Overdue'?'critrow':cadStatus(c.id)==='Due soon'?'attn':'',minw:940,
+      cols:[{h:'Account',v:c=>`<span class="link">${esc(c.name)}</span>`,sv:c=>c.name},{h:'Rep',v:c=>repAv(c.rep)},{h:'Cadence',v:c=>weeksTxt(DB.cad[c.id].eff)+(DB.cad[c.id].eff!==DB.cad[c.id].sug?' <span class="tagc">override</span>':''),sv:c=>DB.cad[c.id].eff},{h:'Last visit',v:c=>fdate(DB.cad[c.id].lastVisit),sv:c=>DB.cad[c.id].lastVisit},{h:'Next due',v:c=>{const d=cadDue(c.id);return d<0?`<span style="color:var(--crit-ink);font-weight:800">${-d} days late</span>`:d===0?'Today':'in '+d+' days';},sv:c=>cadDue(c.id)},{h:'Planned',v:c=>{const v=DB.visits.find(x=>x.cust===c.id&&x.status==='Planned');return v?`${DAYS[v.day]} ${v.time}`:'<span class="muted">—</span>';}},{h:'Status',v:c=>badge(cadStatus(c.id))}],
+      bulk:[['Plan visits','cad-autoplan'],['Change cadence','soon']]})}</div></div>`;
+  }
+  if(tab==='planner'){
+    return head+`<p class="muted" style="font-weight:650;margin:-6px 0 14px">Week of ${fdate(WEEK0.toISOString())}. Click a visit to log the outcome. Auto-plan fills gaps with overdue accounts.</p>
+    <div class="kanban" style="grid-template-columns:repeat(5,minmax(0,1fr))">${DAYS.map((d,i)=>{const vs=vis.filter(v=>v.day===i).sort((a,b)=>a.time.localeCompare(b.time,undefined,{numeric:true}));
+      return `<div class="kcol ${i===TODAY_IDX?'':''}" style="${i===TODAY_IDX?'background:var(--tq)':''}"><h3>${d} ${dayDate(i).getDate()}${i===TODAY_IDX?' <span class="badge b-lime">Today</span>':''}<span class="muted" style="font-weight:700;margin-left:auto">${vs.length}</span></h3>${vs.map(v=>{const c=cust(v.cust);return `<div class="kcard" data-act="visit-open" data-id="${v.id}" tabindex="0" style="cursor:pointer"><div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">${repAv(v.rep)}<span class="muted" style="font-weight:750;font-size:12px">${v.time}</span><span class="spacer"></span>${badge(v.status)}</div><b>${esc(c.name)}</b><div class="meta"><span>${esc(c.city)}</span>·<span>${weeksTxt(DB.cad[c.id].eff)}</span>${v.outcome?`·<span>${esc(v.outcome)}</span>`:''}</div></div>`;}).join('')||'<div class="muted" style="font-weight:600;padding:8px">No visits</div>'}</div>`;}).join('')}</div>`;
+  }
+  if(tab==='missing'){
+    return head+kpiStrip([{l:'Accounts missing an order',v:missing.length},{l:'Expected revenue at risk',v:kmoney(sum(missing,c=>DB.cad[c.id].avgOrder))},{l:'Calls logged today',v:DB.calls.length},{l:'Recovered (30 days)',v:'7',d:'+2'}])+
+    listCard({key:'missing',rows:()=>DB.customers.filter(c=>(!rep||c.rep===rep)&&isMissing(c.id)),href:c=>'#customer-'+c.id,ph:'Search account',text:c=>`${c.name} ${c.rep} ${c.phone}`,sort:3,dir:-1,
+      rowCls:c=>ago(DB.cad[c.id].lastOrder)>DB.cad[c.id].orderEvery*3?'critrow':'attn',
+      cols:[{h:'Account',v:c=>`<span class="link">${esc(c.name)}</span><br><span class="muted" style="font-size:12px">${esc(c.phone)}</span>`,sv:c=>c.name},{h:'Rep',v:c=>repAv(c.rep)},{h:'Usually orders',v:c=>'every '+DB.cad[c.id].orderEvery+' days'},{h:'Last order',v:c=>`${ago(DB.cad[c.id].lastOrder)} days ago`,sv:c=>ago(DB.cad[c.id].lastOrder)},{h:'Expected value',r:1,v:c=>`<span class="strong num">${money(DB.cad[c.id].avgOrder,0)}</span>`,sv:c=>DB.cad[c.id].avgOrder},{h:'Status',v:c=>DB.calls.some(x=>x.cust===c.id)?badge('Done'):badge('Call due')},{h:'',v:c=>`<button class="pill sm" data-act="log-call" data-id="${c.id}">${ic('phone')}Log call</button>`}],
+      bulk:[['Assign to rep','soon'],['Add to call list','soon']]});
+  }
+  // reps
+  return head+`<div class="grid g4">${REPS.map(r=>{const cs=DB.customers.filter(c=>c.rep===r),v=DB.visits.filter(x=>x.rep===r),comp=cs.length?Math.round(cs.filter(c=>cadStatus(c.id)!=='Overdue').length/cs.length*100):100,rev=sum(DB.orders.filter(o=>o.rep===r&&ago(o.date)<30&&o.status!=='Cancelled'),o=>docTotal(o.lines).sub),q=DB.quotes.filter(x=>x.rep===r),won=q.filter(x=>x.status==='Accepted').length,lost=q.filter(x=>['Declined','Expired'].includes(x.status)).length;
+    return `<section class="card ${comp<90?'tq':''}">${cardH('','<span style="display:flex;gap:10px;align-items:center">'+repAv(r)+esc(r)+'</span>',cs.length+' accounts')}<div class="card-b"><div class="bignum num" style="padding:0 0 10px">${comp}%<span style="font-size:16px"> compliance</span></div><dl class="kv"><dt>Visits this week</dt><dd>${v.filter(x=>x.status==='Visited').length} / ${v.length}</dd><dt>Missed</dt><dd>${v.filter(x=>x.status==='Missed').length}</dd><dt>Revenue (30 days)</dt><dd>${kmoney(rev)}</dd><dt>Quote win rate</dt><dd>${Math.round(won/Math.max(1,won+lost)*100)}%</dd><dt>Missing orders</dt><dd>${cs.filter(c=>isMissing(c.id)).length}</dd></dl></div></section>`;}).join('')}</div>`;
+}
+
+/* ---------- Marketing ---------- */
+const MKT_TABS=[['overview','Overview'],['campaigns','Campaigns'],['email','Email'],['lists','Lists & segments'],['pages','Landing pages'],['attribution','Attribution & ROI']];
+const roas=c=>c.spend?c.rev/c.spend:0;
+function pMarketing(tab){ensureExtra();
+  const head=crumbs([['Marketing','#marketing'],[MKT_TABS.find(t=>t[0]===tab)[1]]])+phead('Marketing',`<nav class="seg" aria-label="Range"><button data-act="soon">7 days</button><button class="on">30 days</button><button data-act="soon">Quarter</button></nav>${btn('Export','export','','down')}${btn('+ New campaign','new-campaign','lime')}`)+subnav('marketing',MKT_TABS,tab);
+  const cs=DB.campaigns,spend=sum(cs,c=>c.spend),leads=sum(cs,c=>c.leads),custs=sum(cs,c=>c.custs),rev=sum(cs,c=>c.rev);
+  const byCh={};cs.forEach(c=>{const x=byCh[c.ch]||(byCh[c.ch]={spend:0,leads:0,custs:0,rev:0});x.spend+=c.spend;x.leads+=c.leads;x.custs+=c.custs;x.rev+=c.rev;});
+  const chans=Object.entries(byCh).sort((a,b)=>b[1].rev-a[1].rev);
+  if(tab==='overview'){
+    const wk=[38,42,35,51,47,58,44,62,55,71,66,74],wl=wk.map((_,i)=>'Wk of '+fshort(new Date(WEEK0.getTime()-(11-i)*7*864e5).toISOString()));
+    const [sess,sl]=series(30,d=>Math.round(820+Math.sin(d/3)*140+((d*53)%120)-d*4));
+    const funnel=[['Website sessions',sum(sess)],['Leads captured',leads],['Quotes sent',Math.round(leads*.46)],['New customers',custs]];
+    return head+kpiStrip([
+      {l:'Sessions',v:(sum(sess)/1000).toFixed(1)+'k',d:'+14%',s:sess,sl,sf:x=>x+' sessions'},
+      {l:'Leads',v:leads,d:'+22%',s:wk,sl:wl},
+      {l:'Lead → customer',v:Math.round(custs/leads*100)+'%',d:'+3 pts'},
+      {l:'Cost per lead',v:money(spend/leads,0),d:'−9%'},
+      {l:'Return on ad spend',v:(rev/spend).toFixed(1)+'×',d:'+0.4×'},
+    ])+
+    `<div class="grid g3">${aiCard('AI Marketing Assistant',[
+      ['ACT',`"Halo wiper retargeting" is paused but returned ${roas(cs[4]).toFixed(1)}×. Restart it with a $600 cap? <a href="#campaign-CMP105">Open →</a>`],
+      ['RISK',`Cost per lead on LinkedIn is ${money(byCh['LinkedIn'].spend/byCh['LinkedIn'].leads,0)}, ${Math.round((byCh['LinkedIn'].spend/byCh['LinkedIn'].leads)/(spend/leads)*100-100)}% above average.`],
+      ['WIN',`The abandoned-quote flow made ${money(9180,0)} this month at a 12.4% click rate. <a href="#marketing-email">See email →</a>`]],'Ask: where should next month’s budget go?')}
+      <section class="card">${cardH('chart','Leads','per week · last 12 weeks')}<div class="bignum num">${wk[11]}<span> this week</span></div><div style="padding:6px 12px 14px">${barChart({values:wk,labels:wl,short:wl.map((l,i)=>i===11?'This wk':l.replace('Wk of ','').split(' ')[0]),aria:'Leads per week'})}</div></section>
+      <section class="card tq">${cardH('trend','Conversion funnel','last 30 days')}<div class="card-b">${funnel.map(([k,v],i)=>`<div class="hbar"><span>${k}</span><span class="v num">${v.toLocaleString()}${i?` <small class="muted" style="font-weight:700">${(v/funnel[i-1][1]*100).toFixed(1)}%</small>`:''}</span><div class="track"><div class="fill" style="width:${Math.max(3,Math.sqrt(v/funnel[0][1])*100)}%"></div></div></div>`).join('')}<p class="muted" style="font-weight:600;font-size:12px;margin:10px 2px 0">Bars use a square-root scale so the small stages stay visible. % = conversion from the step above.</p></div></section></div>
+    <div class="grid g21"><section class="card">${cardH('trend','Website sessions','daily · last 30 days')}<div style="padding:10px 8px">${areaChart({values:sess,labels:sl,fmt:x=>x+' sessions',aria:'Website sessions'})}</div></section>
+    <section class="card tq">${cardH('dollar','Revenue by channel','attributed · last 30 days')}<div class="card-b">${chans.map(([k,x])=>`<div class="hbar"><span>${esc(k)}</span><span class="v num">${kmoney(x.rev)}</span><div class="track"><div class="fill" style="width:${x.rev/chans[0][1].rev*100}%"></div></div></div>`).join('')}</div></section></div>
+    <section class="card" style="margin-bottom:16px">${cardH('mega','Active campaigns','',`<a class="pill sm" href="#marketing-campaigns">All campaigns</a>`)}<div style="height:12px"></div>${campTable(cs.filter(c=>c.status==='Live'))}</section>`;
+  }
+  if(tab==='campaigns')return head+kpiStrip([{l:'Spend (30 days)',v:kmoney(spend),sub:'of '+kmoney(sum(cs,c=>c.budget))+' budget'},{l:'Leads',v:leads},{l:'New customers',v:custs},{l:'Attributed revenue',v:kmoney(rev),d:'+18%'},{l:'Blended ROAS',v:(rev/spend).toFixed(1)+'×'}])+
+    listCard({key:'camps',rows:()=>DB.campaigns,href:c=>'#campaign-'+c.k,ph:'Search campaign, channel',text:c=>`${c.name} ${c.ch}`,
+      tabs:[['live','Live',c=>c.status==='Live'],['sched','Scheduled',c=>c.status==='Scheduled campaign'],['paused','Paused',c=>c.status==='Paused'],['done','Completed',c=>c.status==='Completed']],minw:1100,
+      cols:[{h:'Campaign',v:c=>`<span class="link">${esc(c.name)}</span>`,sv:c=>c.name},{h:'Channel',v:c=>esc(c.ch),sv:c=>c.ch},{h:'Status',v:c=>badge(c.status==='Scheduled campaign'?'Scheduled':c.status)},{h:'Spend',v:c=>`<div class="progress" style="width:80px;display:inline-block;vertical-align:middle"><i style="width:${Math.min(100,c.spend/c.budget*100)}%"></i></div> <span class="num" style="font-size:12.5px">${kmoney(c.spend)} / ${kmoney(c.budget)}</span>`,sv:c=>c.spend},{h:'Leads',r:1,v:c=>c.leads,sv:c=>c.leads},{h:'Cost / lead',r:1,v:c=>c.leads?money(c.spend/c.leads,0):'—',sv:c=>c.leads?c.spend/c.leads:0},{h:'Customers',r:1,v:c=>c.custs,sv:c=>c.custs},{h:'Revenue',r:1,v:c=>`<span class="strong num">${kmoney(c.rev)}</span>`,sv:c=>c.rev},{h:'ROAS',r:1,v:c=>c.spend?`<span class="strong">${roas(c).toFixed(1)}×</span>`:'—',sv:roas}],
+      bulk:[['Pause','camp-pause'],['Duplicate','soon']]});
+  if(tab==='email'){const em=DB.emails;return head+kpiStrip([{l:'Emails sent (30 days)',v:sum(em,e=>e.status==='Scheduled campaign'?0:e.sent).toLocaleString()},{l:'Avg open rate',v:(sum(em.filter(e=>e.open),e=>e.open)/em.filter(e=>e.open).length).toFixed(1)+'%',d:'+2.1 pts'},{l:'Avg click rate',v:(sum(em.filter(e=>e.click),e=>e.click)/em.filter(e=>e.click).length).toFixed(1)+'%',d:'+0.8 pts'},{l:'Email revenue',v:kmoney(sum(em,e=>e.rev)),d:'+26%'}])+
+    `<div class="grid g2"><section class="card tq">${cardH('mail','Open rate by email','')}<div class="card-b">${em.filter(e=>e.open).sort((a,b)=>b.open-a.open).slice(0,5).map(e=>`<div class="hbar"><span>${esc(e.name)}</span><span class="v num">${e.open}%</span><div class="track"><div class="fill" style="width:${e.open}%"></div></div></div>`).join('')}</div></section>
+    <section class="card">${cardH('chart','Revenue by email','last 30 days')}<div style="padding:10px 12px">${barChart({values:em.filter(e=>e.rev).map(e=>e.rev),labels:em.filter(e=>e.rev).map(e=>e.name),short:em.filter(e=>e.rev).map(e=>e.name.split(' ')[0]),fmt:x=>money(x,0),axisFmt:kmoney,pl:48,hi:2,aria:'Revenue per email'})}</div></section></div>`+
+    listCard({key:'emails',rows:()=>DB.emails,select:false,ph:'Search email',text:e=>e.name,tabs:[['camp','Campaigns',e=>e.type==='Campaign'],['flow','Flows',e=>e.type==='Flow']],
+      cols:[{h:'Email',v:e=>`<span class="strong">${esc(e.name)}</span>`},{h:'Type',v:e=>badge(e.type==='Flow'?'Flow':'Campaign')},{h:'Status',v:e=>badge(e.status==='Scheduled campaign'?'Scheduled':e.status)},{h:'Sent',r:1,v:e=>e.sent.toLocaleString(),sv:e=>e.sent},{h:'Open rate',r:1,v:e=>e.open?e.open+'%':'—',sv:e=>e.open},{h:'Click rate',r:1,v:e=>e.click?e.click+'%':'—',sv:e=>e.click},{h:'Revenue',r:1,v:e=>`<span class="strong num">${money(e.rev,0)}</span>`,sv:e=>e.rev}]});}
+  if(tab==='lists')return head+`<div class="grid g3">${DB.lists.map(l=>`<section class="card ${l.type==='Segment'?'tq':''}">${cardH('users',esc(l.name),l.type+' · '+esc(l.source))}<div class="card-b"><div class="bignum num" style="padding:0">${l.count.toLocaleString()}<span style="font-size:16px"> contacts</span></div><div style="margin-top:12px">${l.growth?`<span class="delta ${l.growth>0?'up':'down'}">${l.growth>0?arrowUp:arrowDn}${l.growth>0?'+':''}${l.growth}% this month</span>`:'<span class="delta flat">No change</span>'}</div><div style="display:flex;gap:8px;margin-top:14px">${btn('Send campaign','new-campaign','sm lime')}${btn('Export','export','sm')}</div></div></section>`).join('')}</div>`;
+  if(tab==='pages')return head+listCard({key:'pages',rows:()=>DB.pages,select:false,ph:'Search page',text:p=>p.name+' '+p.slug,
+      cols:[{h:'Page',v:p=>`<span class="strong">${esc(p.name)}</span><br><span class="muted" style="font-size:12px">toliccs.com.au${p.slug}</span>`},{h:'Status',v:p=>badge(p.status)},{h:'Visits (30 days)',r:1,v:p=>p.visits.toLocaleString(),sv:p=>p.visits},{h:'Conversion',r:1,v:p=>p.conv?p.conv+'%':'—',sv:p=>p.conv},{h:'Leads',r:1,v:p=>`<span class="strong">${Math.round(p.visits*p.conv/100)}</span>`,sv:p=>p.visits*p.conv},{h:'',v:()=>btn('Edit','soon','sm','edit')}]});
+  // attribution
+  return head+`<div class="grid g2"><section class="card tq">${cardH('dollar','Return on ad spend','revenue ÷ spend, by channel')}<div class="card-b">${chans.filter(([,x])=>x.spend).sort((a,b)=>b[1].rev/b[1].spend-a[1].rev/a[1].spend).map(([k,x],i,arr)=>`<div class="hbar"><span>${esc(k)}</span><span class="v num">${(x.rev/x.spend).toFixed(1)}×</span><div class="track"><div class="fill" style="width:${(x.rev/x.spend)/(arr[0][1].rev/arr[0][1].spend)*100}%"></div></div></div>`).join('')}</div></section>
+  <section class="card">${cardH('chart','Leads by channel','last 30 days')}<div style="padding:10px 12px">${barChart({values:chans.map(([,x])=>x.leads),labels:chans.map(([k])=>k),short:chans.map(([k])=>k.split(' ')[0]),hi:-1,aria:'Leads per channel'})}</div></section></div>
+  <section class="card" style="margin-bottom:16px">${cardH('users','Acquisition cost vs lifetime value','per channel')}<div style="height:12px"></div><div class="tbl-wrap"><table class="t" style="min-width:760px"><thead><tr><th>Channel</th><th class="r">Spend</th><th class="r">Leads</th><th class="r">New customers</th><th class="r">CAC</th><th class="r">Est. 12-month LTV</th><th class="r">LTV : CAC</th></tr></thead><tbody>${chans.map(([k,x])=>{const cac=x.custs?x.spend/x.custs:0,ltv=x.custs?x.rev/x.custs*2.6:0;return `<tr><td class="strong">${esc(k)}</td><td class="r num">${money(x.spend,0)}</td><td class="r num">${x.leads}</td><td class="r num">${x.custs}</td><td class="r num">${money(cac,0)}</td><td class="r num">${money(ltv,0)}</td><td class="r"><span class="badge ${cac&&ltv/cac>=3?'b-good':'b-warn'}">${cac?(ltv/cac).toFixed(1)+'×':'—'}</span></td></tr>`;}).join('')}</tbody></table></div></section>`;
+}
+function campTable(list){return `<div class="tbl-wrap"><table class="t" style="min-width:800px"><thead><tr><th>Campaign</th><th>Channel</th><th class="r">Spend</th><th class="r">Leads</th><th class="r">Revenue</th><th class="r">ROAS</th><th>Status</th></tr></thead><tbody>${list.map(c=>`<tr data-href="#campaign-${c.k}"><td class="link">${esc(c.name)}</td><td>${esc(c.ch)}</td><td class="r num">${kmoney(c.spend)}</td><td class="r num">${c.leads}</td><td class="r num strong">${kmoney(c.rev)}</td><td class="r strong">${roas(c).toFixed(1)}×</td><td>${badge(c.status)}</td></tr>`).join('')}</tbody></table></div>`;}
+function pCampaign(k){ensureExtra();const c=byId('campaigns',k);if(!c)return notFound('Campaign');
+  const n=21,h=[...c.k].reduce((a,x)=>a+x.charCodeAt(0),0);const sp=[...Array(n)].map((_,i)=>c.spend?Math.round(c.spend/n*(.6+((h+i*37)%9)/10)):0),ld=[...Array(n)].map((_,i)=>c.leads?Math.max(0,Math.round(c.leads/n*(.3+((h*3+i*17)%13)/7))):0),lab=series(n,()=>0)[1];
+  return crumbs([['Marketing','#marketing'],['Campaigns','#marketing-campaigns'],[c.name]])+phead(`${esc(c.name)} ${badge(c.status==='Scheduled campaign'?'Scheduled':c.status)}`,`${c.status==='Live'?btn('Pause','camp-pause-one'):c.status==='Paused'?btn('Resume','camp-pause-one','lime'):''}${btn('Edit','soon','','edit')}${btn('Duplicate','soon')}`)+
+  kpiStrip([{l:'Spend',v:money(c.spend,0),sub:Math.round(c.spend/c.budget*100)+'% of '+money(c.budget,0)},{l:'Impressions',v:(c.impr/1000).toFixed(1)+'k'},{l:'Clicks',v:c.clicks.toLocaleString(),sub:(c.clicks/Math.max(1,c.impr)*100).toFixed(2)+'% CTR'},{l:'Leads',v:c.leads,s:ld,sl:lab},{l:'ROAS',v:c.spend?roas(c).toFixed(1)+'×':'—',sub:kmoney(c.rev)+' revenue'}])+
+  `<div class="grid g2"><section class="card">${cardH('chart','Leads per day','last 3 weeks')}<div style="padding:10px 12px">${barChart({values:ld,labels:lab,short:lab.map(l=>l.split(' ')[0]),aria:'Leads per day'})}</div></section>
+  <section class="card">${cardH('trend','Daily spend','')}<div style="padding:10px 8px">${areaChart({values:sp,labels:lab,fmt:x=>money(x,0),axisFmt:kmoney,aria:'Daily spend'})}</div></section></div>
+  <div class="grid g2"><section class="card tq">${cardH('trend','Results','')}<div class="card-b">${[['Clicks',c.clicks,c.impr],['Leads',c.leads,c.clicks],['Customers',c.custs,c.leads]].map(([k,v,base])=>`<div class="hbar"><span>${k}</span><span class="v num">${v.toLocaleString()} <small class="muted">${base?(v/base*100).toFixed(1):0}%</small></span><div class="track"><div class="fill" style="width:${base?Math.max(3,v/base*100):0}%"></div></div></div>`).join('')}</div></section>
+  <section class="card">${cardH('mega','Details','')}<div class="card-b"><dl class="kv"><dt>Channel</dt><dd>${esc(c.ch)}</dd><dt>Owner</dt><dd>${esc(c.owner)}</dd><dt>Start</dt><dd>${fdate(c.start)}</dd><dt>End</dt><dd>${fdate(c.end)}</dd><dt>Budget</dt><dd>${money(c.budget,0)}</dd><dt>UTM</dt><dd>utm_campaign=${c.k.toLowerCase()}</dd></dl></div></section></div>`;}
+
+/* cadence panel on customer page */
+const _pCustomer=pCustomer;
+pCustomer=function(id){let h=_pCustomer(id);const c=byId('customers',id);if(!c)return h;ensureExtra();const cd=DB.cad[c.id],v=DB.visits.find(x=>x.cust===c.id&&x.status==='Planned');
+  const panel=`<section class="card tq" style="margin-bottom:16px">${cardH('cal','Visit cadence',cadStatus(c.id))}<div class="card-b"><div class="hbar" style="display:block"><dl class="kv"><dt>Suggested</dt><dd>${weeksTxt(cd.sug)}</dd><dt>Effective</dt><dd>${weeksTxt(cd.eff)}${cd.eff!==cd.sug?' (override)':''}</dd><dt>Last visit</dt><dd>${fdate(cd.lastVisit)}</dd><dt>Next due</dt><dd>${cadDue(c.id)<0?`<span style="color:var(--crit-ink)">${-cadDue(c.id)} days late</span>`:'in '+cadDue(c.id)+' days'}</dd><dt>Planned</dt><dd>${v?DAYS[v.day]+' '+v.time:'—'}</dd></dl></div><div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">${btn('Change cadence','cad-change','sm','',`data-id="${c.id}"`)}${btn('Log visit','cad-log','sm lime','',`data-id="${c.id}"`)}</div></div></section>`;
+  return h.replace('<div><section class="card" style="margin-bottom:16px">'+cardH('users','Details',''),'<div>'+panel+'<section class="card" style="margin-bottom:16px">'+cardH('users','Details',''));};
+
+Object.assign(PAGES,{cadence:t=>pCadence(CAD_TABS.some(x=>x[0]===t)?t:'overview'),marketing:t=>pMarketing(MKT_TABS.some(x=>x[0]===t)?t:'overview'),campaign:pCampaign,customer:id=>pCustomer(id)});
+Object.assign(ACT,{
+  'cad-rep':el=>{LS.cadRep=el.dataset.r;rerender();},
+  'cad-autoplan':()=>{ensureExtra();const load=[0,0,0,0,0];DB.visits.forEach(v=>load[v.day]++);let n=0;
+    DB.customers.filter(c=>cadStatus(c.id)!=='On track'&&!DB.visits.some(v=>v.cust===c.id&&v.status==='Planned')).forEach(c=>{let d=TODAY_IDX;for(let i=TODAY_IDX;i<5;i++)if(load[i]<load[d])d=i;load[d]++;DB.visits.push({id:'V'+Date.now()+n,cust:c.id,rep:c.rep,day:d,time:['9:00','10:30','13:00','14:30'][n%4],status:'Planned',outcome:''});n++;});
+    save();if(LS.cadacc)LS.cadacc.sel.clear();location.hash='#cadence-planner';rerender();toast(n?`Planned ${n} visits for overdue and due-soon accounts`:'Everyone is already planned');},
+  'visit-open':el=>{const v=DB.visits.find(x=>x.id===el.dataset.id),c=cust(v.cust);simpleForm('Visit — '+c.name,[{k:'status',l:'Status',opts:['Planned','Visited','Missed'],v:v.status},{k:'outcome',l:'Outcome',opts:['','Order taken','No order','Quote requested','Complaint'],v:v.outcome},{k:'day',l:'Day',opts:DAYS,v:DAYS[v.day]},{k:'time',l:'Time',v:v.time}],d=>{v.status=d.status;v.outcome=d.outcome;v.day=DAYS.indexOf(d.day);v.time=d.time;if(d.status==='Visited')DB.cad[v.cust].lastVisit=dayDate(v.day).toISOString();save();rerender();toast('Visit updated');});},
+  'log-call':el=>{const c=cust(el.dataset.id);simpleForm('Log call — '+c.name,[{k:'outcome',l:'Outcome',opts:['Order placed','Will order this week','No answer — retry','Lost to competitor'],full:1},{k:'note',l:'Note',full:1}],d=>{DB.calls.push({cust:c.id,...d,date:TODAY.toISOString()});if(d.outcome==='Order placed')DB.cad[c.id].lastOrder=TODAY.toISOString();save();rerender();toast('Call logged');},'Log call');},
+  'cad-change':el=>{const cd=DB.cad[el.dataset.id];simpleForm('Change visit cadence',[{k:'w',l:'Visit every',opts:['1 week','2 weeks','4 weeks','6 weeks','8 weeks'],v:cd.eff+' week'+(cd.eff>1?'s':''),full:1}],d=>{cd.eff=parseInt(d.w);save();rerender();toast('Cadence set to '+weeksTxt(cd.eff).toLowerCase());});},
+  'cad-log':el=>{DB.cad[el.dataset.id].lastVisit=TODAY.toISOString();const v=DB.visits.find(x=>x.cust===el.dataset.id&&x.status==='Planned');if(v){v.status='Visited';v.outcome='Order taken';}save();rerender();toast('Visit logged for today');},
+  'new-campaign':()=>{ensureExtra();simpleForm('New campaign',[{k:'name',l:'Campaign name',req:1,full:1},{k:'ch',l:'Channel',opts:['Google Ads','Meta Ads','Email','LinkedIn','SEO','Trade show']},{k:'budget',l:'Budget',t:'number',v:1000}],d=>{const id='CMP'+(Math.max(...DB.campaigns.map(c=>+c.id.slice(3)))+1);DB.campaigns.unshift({id,k:id,name:d.name,ch:d.ch,status:'Scheduled campaign',budget:+d.budget,spend:0,leads:0,custs:0,rev:0,clicks:0,impr:0,start:daysAgo(-3).toISOString(),end:daysAgo(-33).toISOString(),owner:'Morgan Lee'});save();location.hash='#campaign-'+id;toast('Campaign created');},'Create campaign');},
+  'camp-pause-one':()=>{const c=byId('campaigns',location.hash.split('-')[1]);c.status=c.status==='Live'?'Paused':'Live';save();rerender();toast('Campaign '+c.status.toLowerCase());},
+});
+const _bulk=ACT.bulk;ACT.bulk=el=>{const a=CUR.bulk[+el.dataset.i][1];if(a==='camp-pause'){const st=LS[CUR.key];[...st.sel].forEach(id=>{const c=byId('campaigns',id);if(c&&c.status==='Live')c.status='Paused';});save();st.sel.clear();refreshList();toast('Campaigns paused');return;}if(a==='cad-autoplan'){ACT['cad-autoplan']();return;}_bulk(el);};
+const _reset=ACT.reset;ACT.reset=()=>{_reset();ensureExtra();rerender();};
+const _qc=ACT.qcmenu;ACT.qcmenu=()=>{_qc();$('#qcmenu').insertAdjacentHTML('beforeend',`<button data-act="new-campaign">${ic('mega')}Campaign</button>`);};
 
 route();
 </script>
