@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nucleus Deliveries — Design Lab (Preview)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#E6EBE7;           /* app canvas: soft mint-grey */
+    --card:#FFFFFF;
+    --card-2:#F4F6F4;
+    --ink:#0B0B0B;          /* primary text  ~19:1 on white */
+    --ink-2:#2E3430;        /* secondary     ~12:1 */
+    --ink-3:#545B57;        /* muted         ~6.8:1 (still AA) */
+    --line:#DCE1DD;
+    --line-2:#C9CFCB;
+    --lime:#DDF26B;         /* accent fill — always with black text */
+    --lime-ink:#0B0B0B;
+    --good:#1F7A3A; --good-bg:#DCF2E2; --good-ink:#0B4A1F;
+    --warn:#B7791F; --warn-bg:#FFE45C; --warn-ink:#0B0B0B;
+    --info:#2B5FD9; --info-bg:#E0E8FC; --info-ink:#163E9C;
+    --crit:#C2362B; --crit-bg:#FBE1DE; --crit-ink:#8A1F17;
+    --radius:22px;
+    --shadow:0 1px 0 rgba(11,11,11,.04), 0 8px 24px -12px rgba(11,11,11,.12);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;overflow-x:hidden}
+  body{font-family:Manrope,system-ui,sans-serif;background:var(--bg);color:var(--ink);font-size:14px;-webkit-font-smoothing:antialiased}
+  button{font:inherit;color:inherit;cursor:pointer}
+  .num{font-variant-numeric:tabular-nums}
+
+  /* preview banner */
+  .preview{background:var(--ink);color:#fff;font-size:12.5px;font-weight:600;display:flex;gap:10px;align-items:center;justify-content:center;padding:7px 12px;letter-spacing:.01em}
+  .preview b{background:var(--lime);color:var(--ink);border-radius:999px;padding:2px 9px;font-size:11px;letter-spacing:.06em}
+
+  /* top bar */
+  .top{display:flex;align-items:center;gap:16px;padding:18px 28px}
+  .logo{width:40px;height:40px;display:grid;place-items:center}
+  .nav{display:flex;gap:6px;background:rgba(255,255,255,.55);padding:5px;border-radius:999px;border:1px solid rgba(11,11,11,.06)}
+  .nav a{display:flex;align-items:center;gap:8px;padding:9px 16px;border-radius:999px;text-decoration:none;color:var(--ink-2);font-weight:600;font-size:13px}
+  .nav a:hover{background:#fff;color:var(--ink)}
+  .nav a.active{background:var(--ink);color:#fff}
+  .nav svg{width:15px;height:15px}
+  .spacer{flex:1}
+  .avatars{display:flex}
+  .avatars span{width:36px;height:36px;border-radius:50%;border:2px solid var(--bg);margin-left:-8px;display:grid;place-items:center;font-weight:700;font-size:12px}
+  .icon-btn{width:40px;height:40px;border-radius:50%;background:#fff;border:1px solid var(--line);display:grid;place-items:center;position:relative}
+  .icon-btn svg{width:17px;height:17px}
+  .dot{position:absolute;top:7px;right:8px;width:8px;height:8px;border-radius:50%;background:var(--crit);border:2px solid #fff}
+
+  .shell{display:grid;grid-template-columns:72px 1fr;gap:0;padding:0 28px 40px 16px}
+  main,.bento>*,.bento2>*,.kpi{min-width:0}
+  .rail{display:flex;flex-direction:column;gap:10px;align-items:center;padding-top:96px}
+  .rail button{width:42px;height:42px;border-radius:50%;border:1px solid var(--line);background:#fff;display:grid;place-items:center}
+  .rail button.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+  .rail svg{width:17px;height:17px}
+
+  .crumbs{display:flex;align-items:center;gap:8px;color:var(--ink-3);font-size:12.5px;font-weight:600;margin:6px 0 10px}
+  .head{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:22px}
+  h1{font-weight:400;font-size:44px;letter-spacing:-.025em;margin:0;line-height:1.05}
+  .pill{display:inline-flex;align-items:center;gap:8px;padding:10px 16px;border-radius:999px;background:#fff;border:1px solid var(--line);font-weight:600;font-size:13px}
+  .pill.dark{background:var(--ink);color:#fff;border-color:var(--ink)}
+  .pill svg{width:15px;height:15px}
+  .seg{display:flex;background:#fff;border:1px solid var(--line);border-radius:999px;padding:4px}
+  .seg button{border:0;background:none;padding:7px 13px;border-radius:999px;font-weight:600;font-size:12.5px;color:var(--ink-2)}
+  .seg button.on{background:var(--ink);color:#fff}
+
+  .card{background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);border:1px solid rgba(11,11,11,.05)}
+  .card-h{display:flex;align-items:center;gap:10px;padding:18px 20px 0}
+  .card-h h3{margin:0;font-size:16px;font-weight:700;letter-spacing:-.01em}
+  .card-h small{display:block;color:var(--ink-3);font-weight:600;font-size:12px}
+  .card-h .ic{width:34px;height:34px;border-radius:50%;border:1px solid var(--line);display:grid;place-items:center}
+  .card-h .ic svg{width:15px;height:15px}
+  .card-h .tools{margin-left:auto;display:flex;gap:6px}
+  .mini{width:32px;height:32px;border-radius:50%;border:1px solid var(--line);background:#fff;display:grid;place-items:center}
+  .mini svg{width:14px;height:14px}
+
+  /* KPI strip — Shopify-like legibility */
+  .kpis{display:grid;grid-template-columns:repeat(6,1fr);margin-bottom:16px}
+  .kpi{padding:18px 20px;border-left:1px solid var(--line);display:flex;flex-direction:column;gap:6px;cursor:pointer;position:relative}
+  .kpi:first-child{border-left:0}
+  .kpi:hover{background:var(--card-2)}
+  .kpi.sel{background:var(--card-2)}
+  .kpi.sel::after{content:"";position:absolute;left:20px;right:20px;bottom:0;height:3px;border-radius:3px 3px 0 0;background:var(--ink)}
+  .kpi .lbl{font-weight:700;font-size:13px;color:var(--ink);text-decoration:underline dotted var(--line-2);text-underline-offset:4px}
+  .kpi .row{display:flex;align-items:flex-end;justify-content:space-between;gap:8px}
+  .kpi .val{font-size:30px;font-weight:600;letter-spacing:-.02em;line-height:1}
+  .delta{display:inline-flex;align-items:center;gap:3px;font-weight:700;font-size:12px;padding:3px 7px;border-radius:999px;margin-top:6px}
+  .delta.up{background:var(--good-bg);color:var(--good-ink)}
+  .delta.down{background:var(--crit-bg);color:var(--crit-ink)}
+  .delta.flat{background:#ECEEEC;color:var(--ink-2)}
+  .delta svg{width:11px;height:11px}
+  .spark{width:96px;height:34px;overflow:visible}
+
+  /* bento grid */
+  .bento{display:grid;grid-template-columns:1.05fr 1.25fr 1fr;gap:16px;margin-bottom:16px}
+  .bento2{display:grid;grid-template-columns:1.6fr 1fr;gap:16px;margin-bottom:16px}
+
+  .ai{background:linear-gradient(160deg,#D7E9DA 0%,#EEF3E2 60%,#F5F7EE 100%);position:relative;overflow:hidden;min-height:330px;display:flex;flex-direction:column}
+  .ai .card-h h3{font-weight:600}
+  .ai canvas{position:absolute;inset:40px -20px 70px -20px;width:calc(100% + 40px);height:calc(100% - 110px)}
+  .ai .insights{position:relative;margin-top:auto;padding:0 14px 14px;display:flex;flex-direction:column;gap:8px}
+  .ai .ins{background:rgba(255,255,255,.88);backdrop-filter:blur(6px);border-radius:16px;padding:10px 12px;font-size:12.5px;font-weight:600;color:var(--ink);display:flex;gap:10px;align-items:flex-start;border:1px solid rgba(11,11,11,.06)}
+  .ai .ins .tag{flex:none;font-size:10.5px;font-weight:800;letter-spacing:.05em;padding:3px 7px;border-radius:999px}
+  .ask{display:flex;align-items:center;gap:10px;background:var(--lime);border-radius:999px;padding:6px 6px 6px 16px;font-weight:600;font-size:12.5px}
+  .ask input{flex:1;border:0;background:none;font:inherit;color:var(--ink);outline:none;min-width:0}
+  .ask input::placeholder{color:#3a4030}
+  .ask button{width:36px;height:36px;border-radius:50%;background:var(--ink);color:#fff;border:0;display:grid;place-items:center}
+
+  .stats-row{display:flex;gap:22px;padding:14px 20px 0;flex-wrap:wrap}
+  .stats-row div{font-size:12px;color:var(--ink-3);font-weight:600}
+  .stats-row b{display:block;font-size:22px;color:var(--ink);font-weight:600;letter-spacing:-.02em}
+
+  .big{font-size:46px;font-weight:400;letter-spacing:-.03em;padding:8px 20px 0;line-height:1}
+  .big span{color:var(--ink-3)}
+  .sub{padding:4px 20px 0;color:var(--ink-3);font-weight:600;font-size:12px}
+
+  svg text{font-family:Manrope,system-ui,sans-serif}
+  .axis{fill:var(--ink-3);font-size:11px;font-weight:600}
+  .chart{display:block;width:100%}
+
+  .legend{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+  .legend li{display:grid;grid-template-columns:12px 1fr auto auto;gap:10px;align-items:center;font-weight:600;font-size:13px}
+  .legend i{width:12px;height:12px;border-radius:4px}
+  .legend .c{font-weight:700;color:var(--ink)}
+  .legend .p{color:var(--ink-3);font-size:12px;width:38px;text-align:right}
+
+  .hbar{display:grid;grid-template-columns:150px 1fr 54px;gap:12px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line);font-weight:600;font-size:13px}
+  .hbar:last-child{border-bottom:0}
+  .hbar .track{height:12px;background:#ECEFEC;border-radius:6px;position:relative;overflow:hidden}
+  .hbar .fill{position:absolute;inset:0 auto 0 0;background:var(--ink);border-radius:6px}
+  .hbar .target{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--crit)}
+  .hbar .v{text-align:right;font-weight:700}
+
+  /* table */
+  .tbl-wrap{overflow-x:auto}
+  .tabs{display:flex;gap:4px;padding:14px 16px 0;flex-wrap:wrap;align-items:center}
+  .tab{border:0;background:none;padding:8px 12px;border-radius:999px;font-weight:700;font-size:13px;color:var(--ink-2);display:flex;gap:7px;align-items:center}
+  .tab .n{background:#E9ECEA;color:var(--ink);border-radius:999px;padding:1px 7px;font-size:11.5px}
+  .tab.on{background:var(--ink);color:#fff}
+  .tab.on .n{background:var(--lime);color:var(--ink)}
+  .search{margin-left:auto;display:flex;align-items:center;gap:8px;border:1px solid var(--line-2);border-radius:999px;padding:7px 12px;min-width:260px;background:#fff}
+  .search input{border:0;outline:none;font:inherit;flex:1;color:var(--ink)}
+  .search input::placeholder{color:var(--ink-3)}
+  .search svg{width:15px;height:15px;color:var(--ink-3)}
+  table{width:100%;border-collapse:collapse;min-width:1180px}
+  thead th{text-align:left;font-size:12.5px;font-weight:700;color:var(--ink-2);padding:12px 12px;border-bottom:1px solid var(--line-2);background:var(--card-2);white-space:nowrap;position:sticky;top:0}
+  thead th:first-child{padding-left:20px}
+  tbody td{padding:13px 12px;border-bottom:1px solid var(--line);font-size:14px;white-space:nowrap;color:var(--ink-2);font-weight:500}
+  tbody td:first-child{padding-left:20px}
+  tbody tr{cursor:pointer}
+  tbody tr:hover td{background:#F6F8F6}
+  tbody tr.attn td{color:var(--ink);font-weight:700}
+  tbody tr.attn td:first-child{box-shadow:inset 3px 0 0 var(--warn)}
+  tbody tr.failrow td:first-child{box-shadow:inset 3px 0 0 var(--crit)}
+  tbody tr.selrow td{background:#F1F7DA}
+  .ord{font-weight:800;color:var(--ink)}
+  .r{text-align:right}
+  .chk{width:17px;height:17px;accent-color:var(--ink)}
+  .badge{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;font-size:12.5px;font-weight:700;line-height:1.2}
+  .badge svg{width:12px;height:12px;flex:none}
+  .b-neutral{background:#E7EAE8;color:#1F2420}
+  .b-warn{background:var(--warn-bg);color:var(--warn-ink)}
+  .b-good{background:var(--good-bg);color:var(--good-ink)}
+  .b-info{background:var(--info-bg);color:var(--info-ink)}
+  .b-crit{background:var(--crit-bg);color:var(--crit-ink)}
+  .b-outline{background:#fff;border:1px solid var(--line-2);color:var(--ink-2)}
+  .tagc{display:inline-block;background:#EEF0EE;border-radius:6px;padding:2px 7px;font-size:12px;font-weight:700;color:var(--ink-2);margin-right:4px}
+  .foot{display:flex;justify-content:space-between;align-items:center;padding:12px 20px;color:var(--ink-3);font-weight:600;font-size:12.5px}
+
+  .bulk{position:fixed;left:50%;bottom:22px;transform:translate(-50%,140%);transition:transform .25s ease;background:var(--ink);color:#fff;border-radius:999px;padding:8px 8px 8px 20px;display:flex;align-items:center;gap:10px;box-shadow:0 18px 40px -12px rgba(0,0,0,.45);z-index:20}
+  .bulk{visibility:hidden}.bulk.show{transform:translate(-50%,0);visibility:visible}
+  .bulk button{border:0;border-radius:999px;padding:9px 14px;font-weight:700;font-size:12.5px;background:#2A2F2C;color:#fff}
+  .bulk button.lime{background:var(--lime);color:var(--ink)}
+
+  /* drawer */
+  .scrim{position:fixed;inset:0;background:rgba(11,11,11,.28);opacity:0;pointer-events:none;transition:opacity .2s;z-index:30}
+  .scrim.show{opacity:1;pointer-events:auto}
+  .drawer{position:fixed;top:12px;right:12px;bottom:12px;width:min(440px,calc(100% - 24px));background:#fff;border-radius:26px;transform:translateX(110%);transition:transform .28s cubic-bezier(.2,.8,.2,1);z-index:31;display:flex;flex-direction:column;overflow:auto;box-shadow:0 30px 60px -20px rgba(0,0,0,.35)}
+  .drawer{visibility:hidden}.drawer.show{transform:none;visibility:visible}
+  .drawer header{padding:20px 22px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line)}
+  .drawer h2{margin:0;font-size:24px;font-weight:600;letter-spacing:-.02em}
+  .drawer .sec{padding:16px 22px;border-bottom:1px solid var(--line)}
+  .drawer .sec h4{margin:0 0 10px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3)}
+  .kv{display:grid;grid-template-columns:130px 1fr;gap:8px 12px;font-size:13.5px}
+  .kv dt{color:var(--ink-3);font-weight:600}
+  .kv dd{margin:0;font-weight:700}
+  .tl{list-style:none;margin:0;padding:0}
+  .tl li{display:grid;grid-template-columns:22px 1fr;gap:10px;padding-bottom:14px;position:relative}
+  .tl li::before{content:"";position:absolute;left:10px;top:20px;bottom:0;width:2px;background:var(--line)}
+  .tl li:last-child::before{display:none}
+  .tl .d{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;background:#E7EAE8}
+  .tl .d.done{background:var(--ink);color:#fff}
+  .tl .d svg{width:12px;height:12px}
+  .tl b{display:block;font-size:13.5px}
+  .tl span{font-size:12.5px;color:var(--ink-3);font-weight:600}
+
+  /* tooltip */
+  .tip{position:fixed;pointer-events:none;background:var(--ink);color:#fff;border-radius:10px;padding:7px 10px;font-size:12px;font-weight:600;transform:translate(-50%,calc(-100% - 12px));opacity:0;transition:opacity .12s;z-index:50;white-space:nowrap}
+  .tip.show{opacity:1}
+  .tip b{color:var(--lime);font-weight:800}
+
+  .hidden-table{position:absolute;left:-9999px}
+  details.dt{padding:0 20px 14px}
+  details.dt summary{cursor:pointer;color:var(--ink-3);font-weight:700;font-size:12px}
+  details.dt table{min-width:0;margin-top:8px}
+  details.dt td,details.dt th{padding:5px 8px;font-size:12px}
+
+  @media (max-width:1200px){
+    .kpis{grid-template-columns:repeat(3,1fr)}
+    .kpi:nth-child(4){border-left:0}
+    .kpi:nth-child(n+4){border-top:1px solid var(--line)}
+    .bento{grid-template-columns:1fr 1fr}
+    .bento .ai{grid-column:1 / -1}
+    .bento2{grid-template-columns:1fr}
+  }
+  @media (max-width:760px){
+    .shell{grid-template-columns:1fr;padding:0 14px 40px}
+    .rail{display:none}
+    .top{padding:14px;flex-wrap:wrap}
+    .nav{order:3;width:100%;overflow-x:auto}
+    h1{font-size:32px}
+    .kpis{grid-template-columns:repeat(2,1fr)}
+    .kpi{border-left:0!important;border-top:1px solid var(--line)}
+    .bento{grid-template-columns:1fr}
+    .search{min-width:0;width:100%;margin-left:0}
+    .avatars{display:none}
+    .spark{width:60px}
+    .kpi .val{font-size:26px}
+  }
+</style>
+</head>
+<body>
+
+<div class="preview"><b>DESIGN LAB</b> Preview of a proposed Deliveries &amp; Fulfilment layout. It uses sample data and isn't connected to live Nucleus.</div>
+
+<header class="top">
+  <div class="logo" aria-label="Nucleus">
+    <svg viewBox="0 0 40 40" width="34" height="34" aria-hidden="true"><circle cx="20" cy="20" r="6" fill="#0B0B0B"/><ellipse cx="20" cy="20" rx="17" ry="7" fill="none" stroke="#0B0B0B" stroke-width="2.4" transform="rotate(35 20 20)"/><ellipse cx="20" cy="20" rx="17" ry="7" fill="none" stroke="#0B0B0B" stroke-width="2.4" transform="rotate(-35 20 20)"/></svg>
+  </div>
+  <nav class="nav" aria-label="Warehouse">
+    <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Dashboard</a>
+    <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9"/></svg>Pick</a>
+    <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/></svg>Stock</a>
+    <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>Receive</a>
+    <a href="#" class="active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="6" width="14" height="11" rx="1.5"/><path d="M15 10h4l3 3v4h-7z"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="19" r="2"/></svg>Deliveries</a>
+    <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>Cycle counts</a>
+  </nav>
+  <div class="spacer"></div>
+  <div class="avatars" aria-label="Team online">
+    <span style="background:#CFE0D3">JR</span><span style="background:#F2D9C4">AM</span><span style="background:#D7DCF5">TK</span><span style="background:#0B0B0B;color:#fff">+3</span>
+  </div>
+  <button class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7"/><path d="M16 6l-4-4-4 4"/><path d="M12 2v13"/></svg>Shared</button>
+  <button class="icon-btn" aria-label="Notifications"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg><i class="dot"></i></button>
+</header>
+
+<div class="shell">
+  <aside class="rail" aria-label="Tools">
+    <button class="on" aria-label="AI assistant"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 4V2M15 16v-2M8 9h2M20 9h2M17.8 11.8L19 13M17.8 6.2L19 5M3 21l9-9M12.2 6.2L11 5"/></svg></button>
+    <button aria-label="Routes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="19" r="2"/><circle cx="18" cy="5" r="2"/><path d="M8 19h8a4 4 0 0 0 0-8H8a4 4 0 0 1 0-8h8"/></svg></button>
+    <button aria-label="Messages"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a8 8 0 0 1-11.6 7.1L3 21l1.9-6.4A8 8 0 1 1 21 12z"/></svg></button>
+    <button aria-label="Documents"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></button>
+    <button aria-label="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
+  </aside>
+
+  <main>
+    <div class="crumbs"><span>Warehouse</span><span aria-hidden="true">→</span><span style="color:var(--ink)">Deliveries &amp; Fulfilment</span></div>
+    <div class="head">
+      <h1>Deliveries &amp; Fulfilment</h1>
+      <div class="spacer"></div>
+      <div class="seg" role="tablist" aria-label="Date range" id="range">
+        <button data-r="7">7 days</button><button data-r="30" class="on">30 days</button><button data-r="90">90 days</button>
+      </div>
+      <button class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export</button>
+      <button class="pill">More actions ▾</button>
+      <button class="pill dark">+ Create delivery</button>
+    </div>
+
+    <!-- KPI STRIP -->
+    <section class="card kpis" id="kpis" aria-label="Key metrics"></section>
+
+    <!-- BENTO ROW 1 -->
+    <div class="bento">
+      <section class="card ai" aria-label="AI dispatch assistant">
+        <div class="card-h"><h3>AI Dispatch Assistant</h3><div class="tools"><button class="mini" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg></button></div></div>
+        <canvas id="wave" aria-hidden="true"></canvas>
+        <div class="insights">
+          <div class="ins"><span class="tag" style="background:var(--warn-bg)">ACT</span><span>2 orders have been unfulfilled for more than 24 hours. #612363 (10 items) misses the Peel run cut-off at 2 pm.</span></div>
+          <div class="ins"><span class="tag" style="background:var(--good-bg);color:var(--good-ink)">WIN</span><span>Metro on-time delivery is up 6 pts this month. Pickup orders now average 3.1 h.</span></div>
+          <form class="ask" onsubmit="event.preventDefault();this.querySelector('input').value='';">
+            <input placeholder="Ask: which orders are at risk today?" aria-label="Ask the dispatch assistant">
+            <button aria-label="Send">→</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="card" aria-label="Orders fulfilled per day">
+        <div class="card-h">
+          <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg></span>
+          <div><h3>Orders fulfilled</h3><small>per day · last 14 days</small></div>
+          <div class="tools"><button class="mini" aria-label="Expand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 17L17 7M8 7h9v9"/></svg></button></div>
+        </div>
+        <div class="big num" id="fulfilledBig"></div>
+        <div class="sub">fulfilled this period · <span id="fulfilledAvg"></span></div>
+        <svg class="chart" id="bars" viewBox="0 0 460 210" role="img" aria-label="Bar chart of orders fulfilled per day"></svg>
+      </section>
+
+      <section class="card" aria-label="Delivery status breakdown">
+        <div class="card-h">
+          <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.2 15.9A10 10 0 1 1 8 2.8"/><path d="M22 12A10 10 0 0 0 12 2v10z"/></svg></span>
+          <div><h3>Delivery status</h3><small>shipments this period</small></div>
+          <div class="tools"><button class="mini" aria-label="Expand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 17L17 7M8 7h9v9"/></svg></button></div>
+        </div>
+        <div style="display:flex;gap:18px;align-items:center;padding:16px 20px 20px;flex-wrap:wrap">
+          <svg id="donut" viewBox="0 0 180 180" width="170" height="170" role="img" aria-label="Donut chart of delivery statuses"></svg>
+          <ul class="legend" id="donutLegend" style="flex:1;min-width:170px"></ul>
+        </div>
+      </section>
+    </div>
+
+    <!-- BENTO ROW 2 -->
+    <div class="bento2">
+      <section class="card" aria-label="Order to fulfilment time trend">
+        <div class="card-h">
+          <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg></span>
+          <div><h3>Order → fulfilment time</h3><small>hours, daily average · target 24 h</small></div>
+          <div class="tools"><button class="mini" aria-label="Filters"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg></button><button class="mini" aria-label="Expand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 17L17 7M8 7h9v9"/></svg></button></div>
+        </div>
+        <div class="stats-row" id="trendStats"></div>
+        <svg class="chart" id="trend" viewBox="0 0 720 230" role="img" aria-label="Line chart of order to fulfilment time"></svg>
+        <details class="dt"><summary>View as table</summary><table id="trendTable"></table></details>
+      </section>
+
+      <section class="card" aria-label="On-time delivery by method">
+        <div class="card-h">
+          <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
+          <div><h3>On-time by delivery method</h3><small>% delivered by promised date · red tick = 95% target</small></div>
+        </div>
+        <div style="padding:10px 20px 16px" id="methods"></div>
+      </section>
+    </div>
+
+    <!-- ORDERS TABLE -->
+    <section class="card" aria-label="Orders">
+      <div class="tabs" id="tabs" role="tablist"></div>
+      <div style="display:flex;padding:12px 16px 12px;gap:10px;flex-wrap:wrap;align-items:center">
+        <span class="badge b-outline">Channel: All ▾</span>
+        <span class="badge b-outline">Delivery method: All ▾</span>
+        <span class="badge b-outline">+ Add filter</span>
+        <label class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input id="q" placeholder="Search orders, customers, tracking #"></label>
+      </div>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr>
+            <th style="width:40px"><input type="checkbox" class="chk" id="all" aria-label="Select all"></th>
+            <th>Order</th><th>Date ↓</th><th>Customer</th><th>Channel</th><th class="r">Total</th>
+            <th>Payment</th><th>Fulfilment</th><th>Items</th><th>Delivery status</th><th>Delivery method</th><th>Tags</th>
+          </tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div class="foot"><span id="count"></span><span>Sample data · click any row for delivery detail</span></div>
+    </section>
+  </main>
+</div>
+
+<div class="bulk" id="bulk" role="toolbar" aria-label="Bulk actions">
+  <span id="bulkN" style="font-weight:700"></span>
+  <button class="lime">Mark as fulfilled</button>
+  <button>Print packing slips</button>
+  <button>Assign to run</button>
+  <button id="bulkClear" aria-label="Clear selection">✕</button>
+</div>
+
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-label="Delivery detail"></aside>
+<div class="tip" id="tip"></div>
+
+<script>
+/* ----------------- sample data (fictional) ----------------- */
+const C = {good:'#1F7A3A',warn:'#B7791F',info:'#2B5FD9',crit:'#C2362B',ink:'#0B0B0B',grid:'#E1E5E2',axis:'#C9CFCB',lime:'#DDF26B'};
+const ICON = {
+  dot:'<svg viewBox="0 0 12 12"><circle cx="6" cy="6" r="4" fill="currentColor"/></svg>',
+  ring:'<svg viewBox="0 0 12 12"><circle cx="6" cy="6" r="4" fill="none" stroke="currentColor" stroke-width="2"/></svg>',
+  half:'<svg viewBox="0 0 12 12"><circle cx="6" cy="6" r="4.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M6 1.8a4.2 4.2 0 0 1 0 8.4z" fill="currentColor"/></svg>',
+  check:'<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2"><path d="M2.5 6.5l2.3 2.3 4.7-5"/></svg>',
+  truck:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><rect x="1" y="6" width="14" height="11" rx="1.5"/><path d="M15 10h4l3 3v4h-7z"/></svg>',
+  tag:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0L2 12V2h10l8.6 8.6a2 2 0 0 1 0 2.8z"/></svg>',
+  x:'<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3l6 6M9 3l-6 6"/></svg>',
+  clock:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>'
+};
+const methods = ['Perth Metro Delivery','Perth Peel (Only Delivers on Tue/Fri)','Pickup in store','Interstate — StarTrack','Perth Metro Delivery'];
+const custs = ['Harbourside Fitouts','Jordan Pike','Lena Varga','Coastal Hydraulics Pty Ltd','Priya Natarajan','Swan Valley Joinery','Marcus Oyelaran','Ellie Brandt','Kwinana Plant Hire','Tom Reyes','Southern Cross Electrical','Hana Mori','Rockingham Marine','Dev Patel','Bunbury Ag Supplies','Ruby Fairweather','Midland Fabrication','Sam Okafor','Ava Lindqvist','Northbridge Cafe Co.','Wes Taylor','Jade Nguyen','Pilbara Mining Services','Owen Clarke'];
+const when = ['Today at 9:12 am','Today at 8:03 am','Yesterday at 3:31 pm','Yesterday at 10:45 am','Monday at 12:36 pm','Monday at 9:20 am','Sunday at 5:35 pm','Sunday at 2:31 pm','Saturday at 10:49 am','Saturday at 8:15 am','Friday at 4:02 pm','Friday at 11:20 am','Friday at 8:01 am','Thursday at 3:44 pm','Thursday at 1:10 pm','Thursday at 9:05 am','Wednesday at 4:50 pm','Wednesday at 11:30 am','Nov 4 at 2:15 pm','Nov 4 at 8:01 am','Nov 3 at 3:22 pm','Nov 3 at 9:48 am','Nov 2 at 1:05 pm','Nov 1 at 10:30 am'];
+// fulfilment: U unfulfilled, P partial, F fulfilled · delivery: none|label|transit|delivered|failed
+const spec = [
+ ['U','none',3,219.13,'Online Store',0,['Rush']],
+ ['U','none',1,64.20,'Online Store',2,[]],
+ ['U','none',10,622.32,'Online Store',1,['Trade']],
+ ['P','label',4,388.10,'Shop',0,['Trade']],
+ ['F','label',1,90.70,'Online Store',2,[]],
+ ['F','transit',3,227.57,'Shop',0,[]],
+ ['F','transit',2,151.30,'Online Store',1,[]],
+ ['F','failed',5,402.85,'Online Store',0,['Re-attempt']],
+ ['F','delivered',3,45.85,'Online Store',0,[]],
+ ['F','delivered',1,139.54,'Online Store',0,[]],
+ ['U','none',6,512.00,'Sales Rep',3,['Trade']],
+ ['F','delivered',2,88.40,'Online Store',2,[]],
+ ['F','delivered',7,1240.90,'Sales Rep',3,['Trade','Net 30']],
+ ['F','transit',1,32.95,'Online Store',0,[]],
+ ['F','delivered',4,276.15,'Shop',0,[]],
+ ['F','delivered',2,118.00,'Online Store',1,[]],
+ ['F','delivered',9,884.60,'Sales Rep',0,['Trade']],
+ ['F','failed',1,57.20,'Online Store',0,['Address check']],
+ ['F','delivered',3,199.99,'Online Store',0,[]],
+ ['F','delivered',2,74.10,'Online Store',2,[]],
+ ['F','delivered',1,410.00,'Sales Rep',3,['Trade']],
+ ['F','delivered',5,302.45,'Online Store',0,[]],
+ ['F','delivered',12,1688.00,'Sales Rep',3,['Trade','Net 30']],
+ ['F','delivered',2,96.30,'Online Store',1,[]],
+];
+const orders = spec.map((s,i)=>({id:612370-i,date:when[i],cust:custs[i],ful:s[0],del:s[1],items:s[2],total:s[3],chan:s[4],method:methods[s[5]],tags:s[6],
+  pay: i===10?'pending':(i===3?'partial':'paid'), track: s[1]==='none'?null:('ST'+(88214000+i*137))}));
+
+/* ----------------- helpers ----------------- */
+const $ = s=>document.querySelector(s);
+const fmt$ = n=>'$'+n.toLocaleString('en-AU',{minimumFractionDigits:2,maximumFractionDigits:2});
+const tip = $('#tip');
+function showTip(e,html){tip.innerHTML=html;tip.style.left=e.clientX+'px';tip.style.top=e.clientY+'px';tip.classList.add('show');}
+function hideTip(){tip.classList.remove('show');}
+function rng(seed){return ()=>{seed=(seed*16807)%2147483647;return (seed-1)/2147483646;}}
+
+/* ----------------- KPI strip ----------------- */
+const R = rng(7);
+function series(n,base,amp){return Array.from({length:n},(_,i)=>Math.max(0,base+Math.sin(i/2.3)*amp*.5+(R()-.5)*amp));}
+const kpiDefs = [
+  {k:'Orders', v:'36', d:'+20%', dir:'up', s:series(30,1.3,1.6), unit:'orders'},
+  {k:'Items ordered', v:'94', d:'+35%', dir:'up', s:series(30,3.2,4), unit:'items'},
+  {k:'Orders fulfilled', v:'38', d:'+7%', dir:'up', s:series(30,1.3,1.4), unit:'fulfilled'},
+  {k:'Orders delivered', v:'27', d:'+12%', dir:'up', s:series(30,0.9,1.2), unit:'delivered'},
+  {k:'Failed / returned', v:'2', d:'+1', dir:'down', s:series(30,.07,.25), unit:'failed'},
+  {k:'Order → fulfilment', v:'19 h', d:'−16%', dir:'up', s:series(30,19,10), unit:'h avg'},
+];
+const arrowUp='<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 8.5L8.5 3M4 3h4.5v4.5"/></svg>';
+const arrowDn='<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 3.5L8.5 9M8.5 4.5V9H4"/></svg>';
+function sparkSVG(s,i){
+  const w=96,h=34,max=Math.max(...s)||1, step=w/(s.length-1);
+  const pts=s.map((v,j)=>[j*step,h-3-(v/max)*(h-6)]);
+  const d=pts.map((p,j)=>(j?'L':'M')+p[0].toFixed(1)+','+p[1].toFixed(1)).join('');
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" data-i="${i}" aria-hidden="true"><path d="${d}L${w},${h}L0,${h}Z" fill="${C.info}" opacity=".10"/><path d="${d}" fill="none" stroke="${C.info}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle class="sd" r="3.5" fill="#fff" stroke="${C.info}" stroke-width="2" style="display:none"/></svg>`;
+}
+$('#kpis').innerHTML = `<div class="kpi" style="justify-content:center;max-width:none"><span class="lbl" style="text-decoration:none;display:flex;gap:8px;align-items:center"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg><span id="rangeLbl">Last 30 days</span></span><span style="color:var(--ink-3);font-weight:600;font-size:12px">vs previous period</span></div>` +
+  kpiDefs.slice(0,5).map((k,i)=>`<div class="kpi${i===2?' sel':''}" tabindex="0"><span class="lbl">${k.k}</span><div class="row"><div><div class="val num">${k.v}</div><span class="delta ${k.dir}">${k.dir==='up'?arrowUp:arrowDn}${k.d}</span></div>${sparkSVG(k.s,i)}</div></div>`).join('');
+document.querySelectorAll('.spark').forEach(svg=>{
+  const k=kpiDefs[+svg.dataset.i], dot=svg.querySelector('.sd');
+  svg.addEventListener('mousemove',e=>{
+    const r=svg.getBoundingClientRect(); const j=Math.round((e.clientX-r.left)/r.width*(k.s.length-1));
+    const max=Math.max(...k.s)||1; dot.style.display='';dot.setAttribute('cx',j*96/(k.s.length-1));dot.setAttribute('cy',34-3-(k.s[j]/max)*28);
+    showTip(e,`Oct ${13+j>31?(13+j-31):13+j} · <b>${k.s[j].toFixed(k.unit==='h avg'?1:0)}</b> ${k.unit}`);
+  });
+  svg.addEventListener('mouseleave',()=>{dot.style.display='none';hideTip();});
+});
+document.querySelectorAll('.kpi[tabindex]').forEach(el=>el.addEventListener('click',()=>{document.querySelectorAll('.kpi').forEach(x=>x.classList.remove('sel'));el.classList.add('sel');}));
+$('#range').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;document.querySelectorAll('#range button').forEach(x=>x.classList.toggle('on',x===b));$('#rangeLbl').textContent='Last '+b.dataset.r+' days';});
+
+/* ----------------- bar chart: fulfilled per day ----------------- */
+(function(){
+  const days=['Oct 29','Oct 30','Oct 31','Nov 1','Nov 2','Nov 3','Nov 4','Nov 5','Nov 6','Nov 7','Nov 8','Nov 9','Nov 10','Nov 11'];
+  const v=[2,3,1,0,4,3,2,3,5,2,0,1,4,3]; const today=v.length-1;
+  const total=v.reduce((a,b)=>a+b,0);
+  $('#fulfilledBig').innerHTML=total+'<span> orders</span>';
+  $('#fulfilledAvg').textContent=(total/v.length).toFixed(1)+' / day avg';
+  const W=460,H=210,pl=26,pr=8,pt=34,pb=26,max=6, bw=(W-pl-pr)/v.length, gap=6;
+  let s=`<defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="${C.lime}"/><line x1="0" y1="0" x2="0" y2="6" stroke="#0B0B0B" stroke-width="1.4" opacity=".55"/></pattern></defs>`;
+  for(let g=0;g<=max;g+=2){const y=pt+(H-pt-pb)*(1-g/max);s+=`<line x1="${pl}" x2="${W-pr}" y1="${y}" y2="${y}" stroke="${g?C.grid:C.axis}" stroke-width="1"/><text class="axis" x="${pl-8}" y="${y+4}" text-anchor="end">${g}</text>`;}
+  v.forEach((n,i)=>{
+    const h=(H-pt-pb)*(n/max), x=pl+i*bw+gap/2, y=H-pb-h, w=bw-gap;
+    const isT=i===today;
+    if(n>0) s+=`<path d="M${x},${H-pb}V${y+Math.min(4,h)}a4,4 0 0 1 4,-4h${w-8}a4,4 0 0 1 4,4V${H-pb}Z" fill="${isT?'url(#hatch)':'#C9D0CB'}" ${isT?'stroke="#0B0B0B" stroke-width="1.2"':''}/>`;
+    if(i%2===1||isT) s+=`<text class="axis" x="${x+w/2}" y="${H-8}" text-anchor="middle" ${isT?'style="fill:#0B0B0B;font-weight:800"':''}>${isT?'Today':days[i].split(' ')[1]}</text>`;
+    if(isT) s+=`<rect x="${x+w/2-20}" y="${y-26}" width="40" height="20" rx="10" fill="${C.lime}" stroke="#0B0B0B" stroke-width="1"/><text x="${x+w/2}" y="${y-12}" text-anchor="middle" font-size="12" font-weight="800" fill="#0B0B0B">${n}</text>`;
+    s+=`<rect class="hit" data-i="${i}" x="${pl+i*bw}" y="${pt}" width="${bw}" height="${H-pt-pb}" fill="transparent"/>`;
+  });
+  const svg=$('#bars'); svg.innerHTML=s;
+  svg.querySelectorAll('.hit').forEach(r=>{r.addEventListener('mousemove',e=>showTip(e,`${days[+r.dataset.i]} · <b>${v[+r.dataset.i]}</b> orders fulfilled`));r.addEventListener('mouseleave',hideTip);});
+})();
+
+/* ----------------- donut: delivery status ----------------- */
+(function(){
+  // order validated: good, warn, info, crit (adjacent pairs pass normal-vision + CVD checks)
+  const data=[{k:'Delivered',n:27,c:C.good,ic:ICON.check},{k:'Awaiting dispatch',n:6,c:C.warn,ic:ICON.ring},{k:'In transit',n:5,c:C.info,ic:ICON.truck},{k:'Failed / re-attempt',n:2,c:C.crit,ic:ICON.x}];
+  const tot=data.reduce((a,d)=>a+d.n,0), cx=90,cy=90,r=70,ri=46;
+  let a0=-Math.PI/2, s='';
+  const gapA=0.035;
+  data.forEach((d,i)=>{
+    const a1=a0+d.n/tot*Math.PI*2;
+    const s0=a0+gapA/2, s1=a1-gapA/2;
+    const P=(rad,ang)=>[cx+rad*Math.cos(ang),cy+rad*Math.sin(ang)];
+    const [x0,y0]=P(r,s0),[x1,y1]=P(r,s1),[x2,y2]=P(ri,s1),[x3,y3]=P(ri,s0); const L=(s1-s0)>Math.PI?1:0;
+    s+=`<path data-i="${i}" d="M${x0},${y0}A${r},${r} 0 ${L} 1 ${x1},${y1}L${x2},${y2}A${ri},${ri} 0 ${L} 0 ${x3},${y3}Z" fill="${d.c}" stroke="#fff" stroke-width="2"/>`;
+    a0=a1;
+  });
+  s+=`<text x="${cx}" y="${cy-2}" text-anchor="middle" font-size="30" font-weight="600" fill="#0B0B0B">${Math.round(27/tot*100)}%</text><text x="${cx}" y="${cy+18}" text-anchor="middle" class="axis">delivered</text>`;
+  const svg=$('#donut'); svg.innerHTML=s;
+  svg.querySelectorAll('path').forEach(p=>{const d=data[+p.dataset.i];p.addEventListener('mousemove',e=>showTip(e,`${d.k} · <b>${d.n}</b> (${Math.round(d.n/tot*100)}%)`));p.addEventListener('mouseleave',hideTip);});
+  $('#donutLegend').innerHTML=data.map(d=>`<li><i style="background:${d.c}"></i><span>${d.k}</span><span class="c num">${d.n}</span><span class="p num">${Math.round(d.n/tot*100)}%</span></li>`).join('');
+})();
+
+/* ----------------- line: order -> fulfilment time ----------------- */
+(function(){
+  const R2=rng(42); const n=30;
+  const v=Array.from({length:n},(_,i)=>Math.max(3,Math.round((26-i*.35+Math.sin(i/2)*6+(R2()-.5)*10)*10)/10));
+  const labels=Array.from({length:n},(_,i)=>{const d=new Date(2026,9,13+i);return d.toLocaleDateString('en-AU',{day:'numeric',month:'short'});});
+  const sorted=[...v].sort((a,b)=>a-b), med=sorted[Math.floor(n/2)], avg=v.reduce((a,b)=>a+b,0)/n, over=v.filter(x=>x>24).length;
+  $('#trendStats').innerHTML=`<div>Average<b class="num">${avg.toFixed(1)} h</b></div><div>Median<b class="num">${med.toFixed(1)} h</b></div><div>Fastest<b class="num">${Math.min(...v)} h</b></div><div>Slowest<b class="num">${Math.max(...v)} h</b></div><div>Days over target<b class="num">${over} / ${n}</b></div>`;
+  const W=720,H=230,pl=34,pr=14,pt=18,pb=28,max=48;
+  const X=i=>pl+i*(W-pl-pr)/(n-1), Y=val=>pt+(H-pt-pb)*(1-val/max);
+  let s='';
+  for(let g=0;g<=max;g+=12){s+=`<line x1="${pl}" x2="${W-pr}" y1="${Y(g)}" y2="${Y(g)}" stroke="${g?C.grid:C.axis}"/><text class="axis" x="${pl-8}" y="${Y(g)+4}" text-anchor="end">${g}h</text>`;}
+  s+=`<line x1="${pl}" x2="${W-pr}" y1="${Y(24)}" y2="${Y(24)}" stroke="${C.crit}" stroke-width="1.5" stroke-dasharray="5 4"/><text x="${W-pr}" y="${Y(24)-6}" text-anchor="end" font-size="11" font-weight="800" fill="${C.crit}">Target 24 h</text>`;
+  const d=v.map((y,i)=>(i?'L':'M')+X(i).toFixed(1)+','+Y(y).toFixed(1)).join('');
+  s+=`<path d="${d}L${X(n-1)},${Y(0)}L${X(0)},${Y(0)}Z" fill="#0B0B0B" opacity=".06"/>`;
+  s+=`<path d="${d}" fill="none" stroke="#0B0B0B" stroke-width="2" stroke-linejoin="round"/>`;
+  v.forEach((y,i)=>{ if(i%5===0) s+=`<text class="axis" x="${X(i)}" y="${H-8}" text-anchor="middle">${labels[i]}</text>`; });
+  // last point marker + label
+  s+=`<circle cx="${X(n-1)}" cy="${Y(v[n-1])}" r="5" fill="${C.lime}" stroke="#0B0B0B" stroke-width="2"/>`;
+  s+=`<g id="xh" style="display:none"><line id="xhl" y1="${pt}" y2="${H-pb}" stroke="#0B0B0B" stroke-width="1" stroke-dasharray="3 3"/><circle id="xhc" r="5" fill="#fff" stroke="#0B0B0B" stroke-width="2"/></g>`;
+  s+=`<rect id="trendHit" x="${pl}" y="${pt}" width="${W-pl-pr}" height="${H-pt-pb}" fill="transparent"/>`;
+  const svg=$('#trend'); svg.innerHTML=s;
+  const hit=svg.querySelector('#trendHit'), xh=svg.querySelector('#xh');
+  hit.addEventListener('mousemove',e=>{
+    const r=svg.getBoundingClientRect(); const px=(e.clientX-r.left)/r.width*W;
+    const i=Math.max(0,Math.min(n-1,Math.round((px-pl)/((W-pl-pr)/(n-1)))));
+    xh.style.display='';svg.querySelector('#xhl').setAttribute('x1',X(i));svg.querySelector('#xhl').setAttribute('x2',X(i));
+    svg.querySelector('#xhc').setAttribute('cx',X(i));svg.querySelector('#xhc').setAttribute('cy',Y(v[i]));
+    showTip(e,`${labels[i]} · <b>${v[i]} h</b> ${v[i]>24?'· over target':''}`);
+  });
+  hit.addEventListener('mouseleave',()=>{xh.style.display='none';hideTip();});
+  $('#trendTable').innerHTML='<tr><th>Date</th><th>Avg hours</th></tr>'+v.map((y,i)=>`<tr><td>${labels[i]}</td><td>${y}</td></tr>`).join('');
+})();
+
+/* ----------------- methods ----------------- */
+$('#methods').innerHTML=[['Pickup in store',100,9],['Perth Metro Delivery',96,21],['Perth Peel (Tue/Fri)',88,6],['Interstate — StarTrack',91,4]].map(([k,p,n])=>
+  `<div class="hbar"><span>${k}<br><small style="color:var(--ink-3);font-weight:600">${n} shipments</small></span><div class="track" title="${p}% on time"><div class="fill" style="width:${p}%;background:${p<95?C.crit:'#0B0B0B'}"></div><div class="target" style="left:95%"></div></div><span class="v num">${p}%${p<95?' <span class="badge b-crit" style="padding:1px 6px;font-size:10.5px">!</span>':''}</span></div>`).join('');
+
+/* ----------------- table ----------------- */
+const tabsDef=[
+  ['all','All',o=>true],
+  ['unful','Unfulfilled',o=>o.ful!=='F'],
+  ['ready','Ready to ship',o=>o.del==='label'],
+  ['transit','In transit',o=>o.del==='transit'],
+  ['delivered','Delivered',o=>o.del==='delivered'],
+  ['failed','Failed',o=>o.del==='failed'],
+];
+let tab='all', q='', selected=new Set();
+function payBadge(p){return p==='paid'?`<span class="badge b-neutral">${ICON.dot}Paid</span>`:p==='partial'?`<span class="badge b-warn">${ICON.half}Partially paid</span>`:`<span class="badge b-warn">${ICON.ring}Payment pending</span>`;}
+function fulBadge(f){return f==='F'?`<span class="badge b-neutral">${ICON.dot}Fulfilled</span>`:f==='P'?`<span class="badge b-warn">${ICON.half}Partially fulfilled</span>`:`<span class="badge b-warn">${ICON.ring}Unfulfilled</span>`;}
+function delBadge(d){return {none:'<span style="color:var(--ink-3)">—</span>',label:`<span class="badge b-neutral">${ICON.tag}Label printed</span>`,transit:`<span class="badge b-info">${ICON.truck}In transit</span>`,delivered:`<span class="badge b-good">${ICON.check}Delivered</span>`,failed:`<span class="badge b-crit">${ICON.x}Delivery failed</span>`}[d];}
+function renderTabs(){
+  $('#tabs').innerHTML=tabsDef.map(([k,l,f])=>`<button class="tab${tab===k?' on':''}" data-k="${k}" role="tab" aria-selected="${tab===k}">${l}<span class="n">${orders.filter(f).length}</span></button>`).join('');
+}
+function renderRows(){
+  const f=tabsDef.find(t=>t[0]===tab)[2];
+  const list=orders.filter(f).filter(o=>!q||(`#${o.id} ${o.cust} ${o.method} ${o.track||''} ${o.tags.join(' ')}`).toLowerCase().includes(q));
+  $('#rows').innerHTML=list.map(o=>`<tr data-id="${o.id}" class="${o.ful!=='F'?'attn':''} ${o.del==='failed'?'failrow':''} ${selected.has(o.id)?'selrow':''}">
+    <td><input type="checkbox" class="chk rowchk" ${selected.has(o.id)?'checked':''} aria-label="Select order ${o.id}"></td>
+    <td class="ord">#${o.id}</td><td>${o.date}</td><td style="color:var(--ink);font-weight:600">${o.cust}</td><td>${o.chan}</td>
+    <td class="r num" style="color:var(--ink);font-weight:700">${fmt$(o.total)}</td>
+    <td>${payBadge(o.pay)}</td><td>${fulBadge(o.ful)}</td><td class="num">${o.items} item${o.items>1?'s':''}</td>
+    <td>${delBadge(o.del)}</td><td style="max-width:230px;overflow:hidden;text-overflow:ellipsis">${o.method}</td>
+    <td>${o.tags.map(t=>`<span class="tagc">${t}</span>`).join('')}</td></tr>`).join('') || `<tr><td colspan="12" style="text-align:center;padding:40px;color:var(--ink-3)">No orders match this filter.</td></tr>`;
+  $('#count').textContent=`Showing ${list.length} of ${orders.length} orders`;
+  $('#all').checked=list.length>0&&list.every(o=>selected.has(o.id));
+}
+function updateBulk(){$('#bulk').classList.toggle('show',selected.size>0);$('#bulkN').textContent=selected.size+' selected';}
+$('#tabs').addEventListener('click',e=>{const b=e.target.closest('.tab');if(!b)return;tab=b.dataset.k;renderTabs();renderRows();});
+$('#q').addEventListener('input',e=>{q=e.target.value.trim().toLowerCase();renderRows();});
+$('#rows').addEventListener('click',e=>{
+  const tr=e.target.closest('tr[data-id]'); if(!tr)return; const id=+tr.dataset.id;
+  if(e.target.classList.contains('rowchk')){e.target.checked?selected.add(id):selected.delete(id);tr.classList.toggle('selrow',e.target.checked);updateBulk();return;}
+  openDrawer(orders.find(o=>o.id===id));
+});
+$('#all').addEventListener('change',e=>{document.querySelectorAll('#rows tr[data-id]').forEach(tr=>{const id=+tr.dataset.id;e.target.checked?selected.add(id):selected.delete(id);});renderRows();updateBulk();});
+$('#bulkClear').addEventListener('click',()=>{selected.clear();renderRows();updateBulk();});
+
+/* ----------------- drawer ----------------- */
+function openDrawer(o){
+  const steps=[['Order placed',o.date,true],['Payment captured',o.pay==='paid'?'Stripe · '+fmt$(o.total):'Awaiting payment',o.pay==='paid'],['Picked & packed',o.ful!=='U'?'Bay 3 · Wendy W.':'Not started',o.ful!=='U'],['Label printed',o.track?o.track:'—',!!o.track],['Out for delivery',o.del==='transit'||o.del==='delivered'||o.del==='failed'?'Van 2 · Metro run':'—',['transit','delivered','failed'].includes(o.del)],[o.del==='failed'?'Delivery failed':'Delivered',o.del==='delivered'?'Signed by J. Pike · POD photo':o.del==='failed'?'Nobody home · re-attempt booked':'—',o.del==='delivered']];
+  $('#drawer').innerHTML=`<header><div><div style="font-size:12px;font-weight:700;color:var(--ink-3)">${o.chan}</div><h2>#${o.id}</h2></div><div class="spacer"></div>${fulBadge(o.ful)}<button class="mini" id="dclose" aria-label="Close">✕</button></header>
+  <div class="sec"><h4>Summary</h4><dl class="kv"><dt>Customer</dt><dd>${o.cust}</dd><dt>Total</dt><dd>${fmt$(o.total)} · ${o.items} items</dd><dt>Payment</dt><dd>${payBadge(o.pay)}</dd><dt>Delivery</dt><dd>${delBadge(o.del)}</dd><dt>Method</dt><dd>${o.method}</dd><dt>Tracking</dt><dd>${o.track||'—'}</dd></dl></div>
+  <div class="sec"><h4>Timeline</h4><ul class="tl">${steps.map(([t,s,done])=>`<li><span class="d ${done?'done':''}">${done?ICON.check:''}</span><div><b>${t}</b><span>${s}</span></div></li>`).join('')}</ul></div>
+  <div class="sec" style="display:flex;gap:8px;flex-wrap:wrap;border:0">${o.ful!=='F'?'<button class="pill dark">Fulfil items</button>':''}<button class="pill">Print packing slip</button><button class="pill">Proof of delivery</button></div>`;
+  $('#drawer').classList.add('show');$('#scrim').classList.add('show');
+  $('#dclose').onclick=closeDrawer;
+}
+function closeDrawer(){$('#drawer').classList.remove('show');$('#scrim').classList.remove('show');}
+$('#scrim').addEventListener('click',closeDrawer);
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer();});
+
+renderTabs();renderRows();
+
+/* ----------------- futuristic dot-wave (AI card) ----------------- */
+(function(){
+  const cv=$('#wave'), ctx=cv.getContext('2d'); let t=0, raf;
+  const reduce=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function size(){const r=cv.getBoundingClientRect();cv.width=r.width*devicePixelRatio;cv.height=r.height*devicePixelRatio;}
+  function draw(){
+    const w=cv.width,h=cv.height; ctx.clearRect(0,0,w,h);
+    const cols=70, rows=34;
+    for(let j=0;j<rows;j++){for(let i=0;i<cols;i++){
+      const u=i/cols, v=j/rows;
+      const z=Math.sin(u*6+t)*.5+Math.cos(v*5-t*.8)*.5+Math.sin((u+v)*4+t*.6)*.4;
+      const x=w*(.08+u*.84)+Math.sin(v*3+t)*w*.03;
+      const y=h*(.12+v*.7)-z*h*.13 + (u-.5)*(u-.5)*h*.5;
+      const k=(z+1.4)/2.8;
+      const rr=(.6+k*1.3)*devicePixelRatio;
+      ctx.fillStyle=`rgba(${Math.round(150+k*80)},${Math.round(60+ (1-k)*40)},${Math.round(70+(1-k)*40)},${.25+k*.6})`;
+      ctx.beginPath();ctx.arc(x,y,rr,0,7);ctx.fill();
+    }}
+    t+=.012; if(!reduce) raf=requestAnimationFrame(draw);
+  }
+  size(); draw(); addEventListener('resize',()=>{size(); if(reduce)draw();});
+})();
+</script>
+</body>
+</html>
