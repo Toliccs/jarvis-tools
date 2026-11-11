@@ -1235,48 +1235,49 @@ document.addEventListener('dragstart',e=>{const c=e.target.closest&&e.target.clo
 document.addEventListener('dragover',e=>{const col=e.target.closest&&e.target.closest('.kcol');if(col){e.preventDefault();$$('.kcol').forEach(k=>k.classList.toggle('over',k===col));}});
 document.addEventListener('drop',e=>{const col=e.target.closest&&e.target.closest('.kcol');if(!col)return;e.preventDefault();const t=DB.tasks.find(x=>x.id===e.dataTransfer.getData('text/plain'));if(t){t.status=col.dataset.col;save();rerender();toast('Moved to '+t.status);}});
 
-/* halftone suds: a foam patch with a wavy edge, packed with bubbles of many sizes
-   (large inside, tiny at the edge). Bubble rims are drawn as fine dots, with a dotted
-   soap film between them. Fitted between the card title and the insight tiles. */
+/* soap suds: smooth foam built from bubbles. Each turquoise bubble sits in an
+   electric-blue soapy halo, so the blue lace forms between bubbles and the foam
+   edge is naturally scalloped. Everything moves: the patch flows sideways in a
+   seamless loop, bubbles breathe and wobble, and loose bubbles float up into it. */
 let waveRAF;
 function initWaves(){cancelAnimationFrame(waveRAF);const cvs=$$('canvas.wave');if(!cvs.length)return;
-  const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches,dpr=devicePixelRatio||1;
+  const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches,dpr=devicePixelRatio||1,TAU=Math.PI*2;
   const st=cvs.map(cv=>({cv}));
-  const edgeY=(o,x)=>{const u=x/o.w,b=o.bot-o.top;return o.top+b*(.62+.2*Math.sin(u*7.2+.9)+.1*Math.sin(u*16+2.1));};
+  const edgeY=(o,x)=>{const u=x/o.w,b=o.bot-o.top;return o.top+b*(.62+.14*Math.sin(u*TAU*2+.9)+.06*Math.sin(u*TAU*3+2.1));}; // periodic over o.w
   const pack=o=>{let k=11;const rnd=()=>{k=(k*16807)%2147483647;return (k-1)/2147483646;};
-    const band=o.bot-o.top,maxR=Math.min(band*.26,34*dpr),gapp=1.6*dpr;o.b=[];
-    const fits=(x,y,r)=>{if(y-r<o.top-band*.15||x-r<-r*.6||x+r>o.w+r*.6)return false;if(y+r>edgeY(o,x)-1*dpr)return false;
-      for(const c of o.b){const dx=c.x-x,dy=c.y-y,m=c.r+r+gapp;if(dx*dx+dy*dy<m*m)return false;}return true;};
-    for(let pass=0;pass<9;pass++){const target=maxR*Math.pow(.68,pass),tries=pass<3?160:420;
-      for(let i=0;i<tries;i++){const x=rnd()*o.w,y=o.top+rnd()*band;const depth=edgeY(o,x)-y;if(depth<=0)continue;
-        const r=Math.max(1.6*dpr,Math.min(target*(.8+rnd()*.4),depth*.7));if(r<target*.45&&pass<8)continue;
-        if(fits(x,y,r))o.b.push({x,y,r,ph:rnd()*6.28});}}
+    const band=o.bot-o.top,maxR=Math.min(band*.2,26*dpr),gapp=1.4*dpr,W=o.w;o.b=[];
+    const fits=(x,y,r)=>{if(y+r>edgeY(o,x))return false;if(y<o.top-r*.4)return false;
+      for(const c of o.b){let dx=Math.abs(c.x-x);dx=Math.min(dx,W-dx);const dy=c.y-y,m=c.r+r+gapp;if(dx*dx+dy*dy<m*m)return false;}return true;};
+    for(let pass=0;pass<9;pass++){const target=maxR*Math.pow(.72,pass),tries=pass<3?300:700;
+      for(let i=0;i<tries;i++){const x=rnd()*W,y=o.top-band*.1+rnd()*band*1.05;const r=Math.max(2*dpr,target*(.8+rnd()*.4));
+        if(fits(x,y,r))o.b.push({x,y,r,ph:rnd()*TAU,sp:.6+rnd()*.9});}}
+    o.fl=[...Array(8)].map(()=>({x:rnd()*W,r:(1.8+rnd()*3.4)*dpr,ph:rnd()*TAU,sp:.5+rnd()*.8}));
   };
   const size=()=>st.forEach(o=>{const r=o.cv.getBoundingClientRect(),card=o.cv.parentElement,hd=card.querySelector('.card-h'),ins=card.querySelector('.insights');
     o.cv.width=r.width*dpr;o.cv.height=r.height*dpr;o.w=o.cv.width;o.h=o.cv.height;
     o.top=((hd?hd.getBoundingClientRect().bottom:r.top+60)-r.top+4)*dpr;
-    const ft=ins&&ins.firstElementChild;o.bot=((ft?ft.getBoundingClientRect().top:r.top+r.height*.5)-r.top-4)*dpr;
+    const ft=ins&&ins.firstElementChild;o.bot=((ft?ft.getBoundingClientRect().top:r.top+r.height*.5)-r.top-6)*dpr;
     if(o.bot-o.top<50*dpr)o.bot=o.top+50*dpr;pack(o);});
   size();let t=0;
-  const draw=()=>{const blue=document.body.classList.contains('fblue');
-    const rim=blue?'214,224,255':'74,99,240',film=blue?'190,205,255':'81,112,255',fillc=blue?'158,247,245':'110,140,255',hi=blue?'158,247,245':'158,247,245';
-    st.forEach(o=>{const c=o.cv.getContext('2d'),w=o.w;c.clearRect(0,0,w,o.h);
-      c.save();c.beginPath();c.rect(0,o.top,w,o.bot-o.top);c.clip();
-      // dotted soap film along and inside the foam edge
-      const g=4*dpr;
-      for(let x=g/2;x<w;x+=g){const ey=edgeY(o,x)+Math.sin(t*.7+x/(40*dpr))*1.5*dpr;
-        for(let y=o.top+g/2;y<ey;y+=g){const depth=ey-y,a=depth<10*dpr?.55:.16;
-          c.fillStyle=`rgba(${film},${a})`;c.beginPath();c.arc(x,y,(depth<10*dpr?.95:.7)*dpr,0,6.283);c.fill();}}
-      // bubbles: soft tinted interior, dotted rim, small highlight
-      for(const b of o.b){const r=b.r*(1+.035*Math.sin(t*1.1+b.ph)),x=b.x+Math.sin(t*.4+b.ph)*.8*dpr,y=b.y+Math.cos(t*.5+b.ph)*.8*dpr;
-        c.fillStyle=blue?'rgb(74,99,240)':'rgb(190,251,230)';c.beginPath();c.arc(x,y,r,0,6.283);c.fill();
-        c.fillStyle=`rgba(${fillc},${blue?.10:.10})`;c.beginPath();c.arc(x,y,r,0,6.283);c.fill();
-        if(r<3.5*dpr){c.strokeStyle=`rgba(${rim},.85)`;c.lineWidth=1*dpr;c.beginPath();c.arc(x,y,r,0,6.283);c.stroke();continue;}
-        const n=Math.max(10,Math.round(2*Math.PI*r/(2.6*dpr)));
-        for(let i=0;i<n;i++){const a=i/n*6.283,lit=Math.cos(a+2.4);const dr=(.75+.35*Math.max(0,-lit))*dpr;
-          c.fillStyle=`rgba(${rim},${.55+.4*Math.max(0,-lit)})`;c.beginPath();c.arc(x+Math.cos(a)*r,y+Math.sin(a)*r,dr,0,6.283);c.fill();}
-        c.fillStyle=`rgba(${hi},.95)`;c.beginPath();c.ellipse(x-r*.42,y-r*.42,Math.max(1*dpr,r*.16),Math.max(.7*dpr,r*.08),-.8,0,6.283);c.fill();}
-      const fh=16*dpr,gr=c.createLinearGradient(0,o.top,0,o.top+fh);gr.addColorStop(0,'rgba(0,0,0,1)');gr.addColorStop(1,'rgba(0,0,0,0)');
+  const bubble=(c,x,y,r)=>{
+    c.fillStyle='#9EF7F5';c.beginPath();c.arc(x,y,r,0,TAU);c.fill();
+    const lw=Math.max(1,r*.08);c.strokeStyle='#D2FFFC';c.lineWidth=lw;c.beginPath();c.arc(x,y,r-lw/2,0,TAU);c.stroke();
+    if(r>4*dpr){c.strokeStyle='rgba(56,190,205,.28)';c.lineWidth=Math.max(1,r*.06);c.beginPath();c.arc(x,y,r*.84,.1*Math.PI,.42*Math.PI);c.stroke();}
+    c.fillStyle='rgba(240,255,254,.95)';c.beginPath();c.ellipse(x-r*.4,y-r*.42,Math.max(.8*dpr,r*.2),Math.max(.6*dpr,r*.1),-.75,0,TAU);c.fill();};
+  const draw=()=>{const blue=document.body.classList.contains('fblue');const suds=blue?'#2F45CF':'#5170FF';
+    st.forEach(o=>{const c=o.cv.getContext('2d'),w=o.w,band=o.bot-o.top;c.clearRect(0,0,w,o.h);
+      const shift=(t*12*dpr)%w;
+      c.save();c.beginPath();c.rect(0,o.top,w,band);c.clip();
+      const pos=o.b.map(b=>{const r=b.r*(1+.06*Math.sin(t*1.3*b.sp+b.ph)),y=b.y+Math.sin(t*.9*b.sp+b.ph)*1.4*dpr,x=((b.x+shift+Math.cos(t*.7+b.ph)*1.4*dpr)%w+w)%w;return [x,y,r];});
+      const each=(fn)=>pos.forEach(([x,y,r])=>{fn(x,y,r);if(x-r*1.4<0)fn(x+w,y,r);if(x+r*1.4>w)fn(x-w,y,r);});
+      // electric-blue suds: soapy halos around every bubble, merged into one lacy mass
+      c.fillStyle=suds;each((x,y,r)=>{c.beginPath();c.arc(x,y,r*1.22+2.6*dpr,0,TAU);c.fill();});
+      // turquoise bubbles on top
+      each((x,y,r)=>bubble(c,x,y,r));
+      // loose bubbles floating up into the foam
+      for(const f of o.fl){const life=(t*.16*f.sp+f.ph/TAU)%1,x=((f.x+shift+Math.sin(t+f.ph)*5*dpr)%w+w)%w,base=edgeY(o,((x-shift)%w+w)%w);
+        const y=base+band*.32-life*band*.34,a=Math.sin(life*Math.PI);c.globalAlpha=a;bubble(c,x,y,f.r);c.globalAlpha=1;}
+      const fh=14*dpr,gr=c.createLinearGradient(0,o.top,0,o.top+fh);gr.addColorStop(0,'rgba(0,0,0,1)');gr.addColorStop(1,'rgba(0,0,0,0)');
       c.globalCompositeOperation='destination-out';c.fillStyle=gr;c.fillRect(0,o.top,w,fh);c.globalCompositeOperation='source-over';
       c.restore();});
     t+=.016;if(!reduce)waveRAF=requestAnimationFrame(draw);};
