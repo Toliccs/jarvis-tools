@@ -366,6 +366,7 @@ details.dt summary{cursor:pointer;color:var(--ink-3);font-weight:700;font-size:1
         <div class="gres" id="gres"></div>
       </div>
       <div class="spacer"></div>
+      <button class="pill" data-act="share" title="Copy a public link to this prototype"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg>Share</button>
       <div class="qc">
         <button class="pill lime" data-act="qcmenu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12h14"/></svg>Quick create</button>
         <div class="menu" id="qcmenu"></div>
@@ -1439,6 +1440,11 @@ const _bulk=ACT.bulk;ACT.bulk=el=>{const a=CUR.bulk[+el.dataset.i][1];if(a==='ca
 const _reset=ACT.reset;ACT.reset=()=>{_reset();ensureExtra();rerender();};
 const _qc=ACT.qcmenu;ACT.qcmenu=()=>{_qc();$('#qcmenu').insertAdjacentHTML('beforeend',`<button data-act="new-campaign">${ic('mega')}Campaign</button>`);};
 
+const SHARE_URL='https://raw.githack.com/Toliccs/jarvis-tools/claude/friendly-knuth-j9cs2r/demo/nucleus-erp/index.html';
+ACT.share=()=>{const url=SHARE_URL+(location.hash||'');
+  const show=()=>{$('#modal').innerHTML=`<header><h2>Share this prototype</h2><span class="spacer"></span><button class="mini" data-act="close" aria-label="Close">✕</button></header><div class="mb"><p style="margin:0 0 12px;font-weight:600">Anyone with this link can open the prototype, with no login needed. It uses sample data only.</p><div class="field"><label for="shareurl">Public link</label><input id="shareurl" readonly value="${esc(url)}"></div></div><footer><button class="pill" data-act="close">Close</button><button class="pill lime" data-act="share-copy">Copy link</button></footer>`;openLayer('modal');setTimeout(()=>{const i=$('#shareurl');i.focus();i.select();},60);};
+  try{navigator.clipboard.writeText(url).then(()=>{toast('Public link copied. Paste it to Nick.');},show);}catch(e){show();}};
+ACT['share-copy']=()=>{const i=$('#shareurl');i.select();try{navigator.clipboard.writeText(i.value).then(()=>{closeLayers();toast('Public link copied');},()=>toast('Select the link and copy it (Ctrl+C / Cmd+C)'));}catch(e){toast('Select the link and copy it (Ctrl+C / Cmd+C)');}};
 function applyFeature(f){document.body.classList.toggle('fblue',f==='blue');$$('.fswitch button').forEach(b=>b.classList.toggle('on',b.dataset.f===f));try{localStorage.setItem('nucleusLab.feature',f);}catch(e){}}
 ACT.feature=el=>{applyFeature(el.dataset.f);initWaves();toast(el.dataset.f==='blue'?'AI cards: electric blue':'AI cards: turquoise');};
 (()=>{let f='tq';try{f=localStorage.getItem('nucleusLab.feature')||'tq';}catch(e){}applyFeature(f);})();
