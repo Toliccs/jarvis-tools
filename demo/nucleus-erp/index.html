@@ -262,6 +262,8 @@ svg text{font-family:Manrope,system-ui,sans-serif}
 .kcol.over{outline:2px dashed var(--blue);outline-offset:-4px}
 .kcol h3{display:flex;align-items:center;gap:8px;margin:4px 6px 12px;font-size:14px}
 .kcard{background:#fff;border-radius:16px;padding:12px 14px;margin-bottom:12px;border:1px solid rgba(11,11,11,.07);box-shadow:0 1px 2px rgba(11,11,11,.08),3px 8px 18px -6px rgba(24,60,48,.38);cursor:grab;transition:transform .15s,box-shadow .15s}
+.kcard.sel,.kcard.sel:hover{background:var(--lime);border-color:#B5D63F}
+.kcard.sel .meta{color:#2A3310}
 .kcard:hover{transform:translateY(-1px);box-shadow:0 1px 2px rgba(11,11,11,.1),4px 12px 22px -6px rgba(24,60,48,.45)}
 .kcard b{display:block;font-size:13.5px;margin-bottom:6px}
 .kcard .meta{display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--ink-3);font-weight:650}
@@ -1042,7 +1044,7 @@ function pEcommerce(){const so=DB.orders.filter(o=>['Shopify','Online Store'].in
 /* ---------- Tasks (kanban) ---------- */
 function pTasks(){const cols=['To do','In progress','Done'];
   return crumbs([['Tasks']])+phead('Tasks',btn('+ New task','new-task','lime'))+
-  `<p class="muted" style="font-weight:650;margin:-6px 0 14px">Drag cards between columns, or click a card to open it.</p><div class="kanban">${cols.map(c=>`<div class="kcol" data-col="${c}"><h3>${badge(c)}<span class="muted" style="font-weight:700">${DB.tasks.filter(t=>t.status===c).length}</span></h3>${DB.tasks.filter(t=>t.status===c).map(t=>`<div class="kcard" draggable="true" data-task="${t.id}" data-act="task-open" data-id="${t.id}" tabindex="0"><b>${esc(t.title)}</b><div class="meta">${t.prio==='High'?badge('Overdue').replace('Overdue','High'):''}<span>${esc(t.who)}</span>·<span style="${ago(t.due)>0&&t.status!=='Done'?'color:var(--crit-ink)':''}">due ${fshort(t.due)}</span>${t.rid?`· <a href="${t.rt==='customer'?'#customer-'+t.rid:t.rt==='supplier'?'#supplier-'+t.rid:docHref(t.rid)}">${t.rid}</a>`:''}</div></div>`).join('')}</div>`).join('')}</div>`;}
+  `<p class="muted" style="font-weight:650;margin:-6px 0 14px">Drag cards between columns, or click a card to open it.</p><div class="kanban">${cols.map(c=>`<div class="kcol" data-col="${c}"><h3>${badge(c)}<span class="muted" style="font-weight:700">${DB.tasks.filter(t=>t.status===c).length}</span></h3>${DB.tasks.filter(t=>t.status===c).map(t=>`<div class="kcard ${LS.taskSel===t.id?'sel':''}" draggable="true" data-task="${t.id}" data-act="task-open" data-id="${t.id}" tabindex="0"><b>${esc(t.title)}</b><div class="meta">${t.prio==='High'?badge('Overdue').replace('Overdue','High'):''}<span>${esc(t.who)}</span>·<span style="${ago(t.due)>0&&t.status!=='Done'?'color:var(--crit-ink)':''}">due ${fshort(t.due)}</span>${t.rid?`· <a href="${t.rt==='customer'?'#customer-'+t.rid:t.rt==='supplier'?'#supplier-'+t.rid:docHref(t.rid)}">${t.rid}</a>`:''}</div></div>`).join('')}</div>`).join('')}</div>`;}
 
 /* ---------- Settings ---------- */
 const SET_TABS=[['general','General'],['users','Users & roles'],['integrations','Integrations'],['delivery','Delivery'],['documents','Documents'],['notifications','Notifications']];
@@ -1156,7 +1158,7 @@ const ACT={
   'prod-shopify':el=>{prod(el.dataset.id).shopify=el.checked;save();toast(el.checked?'Published to Shopify':'Removed from Shopify');},
   setting:el=>{DB.settings[el.dataset.k]=el.checked;save();toast('Setting saved');},
   deldrawer:el=>delDrawer(byId('orders',el.dataset.id)),
-  'task-open':el=>{const t=DB.tasks.find(x=>x.id===el.dataset.id);simpleForm('Task',[{k:'title',l:'Task',v:t.title,full:1},{k:'who',l:'Assigned to',v:t.who},{k:'status',l:'Status',opts:['To do','In progress','Done'],v:t.status},{k:'prio',l:'Priority',opts:['Normal','High','Low'],v:t.prio}],d=>{Object.assign(t,d);save();rerender();toast('Task updated');});},
+  'task-open':el=>{LS.taskSel=el.dataset.id;$$('.kcard[data-task]').forEach(k=>k.classList.toggle('sel',k.dataset.task===el.dataset.id));const t=DB.tasks.find(x=>x.id===el.dataset.id);simpleForm('Task',[{k:'title',l:'Task',v:t.title,full:1},{k:'who',l:'Assigned to',v:t.who},{k:'status',l:'Status',opts:['To do','In progress','Done'],v:t.status},{k:'prio',l:'Priority',opts:['Normal','High','Low'],v:t.prio}],d=>{Object.assign(t,d);save();rerender();toast('Task updated');});},
   // list
   ltab:el=>{const st=LS[CUR.key];st.tab=el.dataset.k;st.page=0;refreshList();},
   lsort:el=>{const st=LS[CUR.key],i=+el.dataset.i;st.dir=st.sort===i?-st.dir:1;st.sort=i;refreshList();},
