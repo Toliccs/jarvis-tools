@@ -108,8 +108,10 @@ h1 .badge{vertical-align:middle;margin-left:10px;font-size:13px}
 .g4{grid-template-columns:repeat(4,minmax(0,1fr))}
 
 .card.tq{background:var(--tq)}
-.tq .hbar{border-color:rgba(11,11,11,.08)}
-.tq .hbar .track{background:#fff}
+.tq .hbar{background:#fff;border:0;border-radius:16px;padding:11px 14px;margin-bottom:8px;border:1px solid rgba(11,11,11,.06)}
+.tq .hbar:last-child{margin-bottom:0;border-bottom:1px solid rgba(11,11,11,.06)}
+.tq .hbar{grid-template-columns:1fr auto;row-gap:9px}
+.tq .hbar .track{background:#E6EBFF;grid-column:1/-1;order:3}
 .tq .hbar .fill{background:var(--blue)}
 .tq .card-h .ic,.tq .mini{background:#fff;border-color:transparent}
 .tq .toggle{border-color:rgba(11,11,11,.08)}
@@ -619,12 +621,12 @@ function areaChart(o){
   return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(o.aria||'Area chart')}">${s}</svg>`;
 }
 function barChart(o){
-  const W=o.w||460,H=o.h||210,pl=o.pl||34,pr=8,pt=30,pb=26,v=o.values,n=v.length,ints=v.every(Number.isInteger),max=ints&&Math.max(...v)<=12?Math.max(3,Math.ceil(Math.max(...v)*1.05/3)*3):niceMax(Math.max(...v)*1.05),f=o.fmt||(x=>x),hi=o.hi??n-1,bw=(W-pl-pr)/n,gap=Math.max(4,bw*.22),g1=uid('bg'),g2=uid('bg');
-  let s=`<defs>${GRAD(g1)}${GRAD(g2,.5,.5)}</defs>`;
+  const W=o.w||460,H=o.h||210,pl=o.pl||34,pr=8,pt=30,pb=26,v=o.values,n=v.length,ints=v.every(Number.isInteger),max=ints&&Math.max(...v)<=12?Math.max(3,Math.ceil(Math.max(...v)*1.05/3)*3):niceMax(Math.max(...v)*1.05),f=o.fmt||(x=>x),hi=o.hi??n-1,bw=(W-pl-pr)/n,gap=Math.max(4,bw*.22);
+  let s='';
   for(let k=0;k<=3;k++){const val=max*k/3,y=pt+(H-pt-pb)*(1-k/3);s+=`<line x1="${pl}" x2="${W-pr}" y1="${y}" y2="${y}" stroke="${k?C.grid:C.axis}"/><text class="axis" x="${pl-8}" y="${y+4}" text-anchor="end">${(o.axisFmt||(x=>Math.round(x*10)/10))(val)}</text>`;}
   const every=Math.ceil(n/8);
   v.forEach((x,i)=>{const h=(H-pt-pb)*x/max,bx=pl+i*bw+gap/2,y=H-pb-h,w=bw-gap,r=Math.min(5,w/2,h);
-    if(x>0)s+=`<path class="bar" data-tip="${esc(o.labels[i])} · <b>${esc(f(x))}</b>" d="M${bx},${H-pb}V${y+r}a${r},${r} 0 0 1 ${r},-${r}h${w-2*r}a${r},${r} 0 0 1 ${r},${r}V${H-pb}Z" fill="url(#${i===hi?g1:g2})"/>`;
+    if(x>0)s+=`<path class="bar" data-tip="${esc(o.labels[i])} · <b>${esc(f(x))}</b>" d="M${bx},${H-pb}V${y+r}a${r},${r} 0 0 1 ${r},-${r}h${w-2*r}a${r},${r} 0 0 1 ${r},${r}V${H-pb}Z" fill="${C.blue}"/>`;
     if(i%every===0||i===hi)s+=`<text class="axis" x="${bx+w/2}" y="${H-8}" text-anchor="middle" ${i===hi?'style="fill:#0B0B0B;font-weight:800"':''}>${esc(o.short?o.short[i]:o.labels[i])}</text>`;
     if(i===hi){const t=String(f(x)),tw=Math.max(34,t.length*7+16);s+=`<rect x="${bx+w/2-tw/2}" y="${y-26}" width="${tw}" height="20" rx="10" fill="${C.lime}"/><text x="${bx+w/2}" y="${y-12}" text-anchor="middle" font-size="12" font-weight="800" fill="#0B0B0B">${esc(t)}</text>`;}
   });
@@ -979,7 +981,7 @@ function pWarehouse(tab){
       {l:'Orders delivered',v:st('delivered')+st('collected'),d:'+12%',s:series(30,d=>DB.orders.filter(o=>ago(o.date)===d&&['delivered','collected'].includes(o.del)).length)[0],sl:lab30},
       {l:'Failed deliveries',v:st('failed'),d:'+1',dir:'down',s:series(30,d=>DB.orders.filter(o=>ago(o.date)===d&&o.del==='failed').length)[0],sl:lab30},
     ])+
-    `<div class="grid g3">${aiCard('AI Dispatch Assistant',[['ACT',`${DB.orders.filter(o=>fulStatus(o)==='Unfulfilled'&&ago(o.date)>=1).length} orders have been unfulfilled for more than 24 h. <a href="#warehouse-pick">Open pick list →</a>`],['RISK',`${st('failed')} failed deliveries need a re-attempt booked. <a href="#warehouse-runs">Plan runs →</a>`],['WIN','Metro on-time delivery is up 6 pts this month.']],'Ask: which orders are at risk today?')}
+    `<div class="grid g3">${aiCard('AI Dispatch Assistant',[['ACT',`${DB.orders.filter(o=>fulStatus(o)==='Unfulfilled'&&ago(o.date)>=1).length} orders have been unfulfilled for more than 24 h. <a href="#warehouse-pick">Open pick list →</a>`],['RISK',`${st('failed')} failed deliver${st('failed')===1?'y needs':'ies need'} a re-attempt booked. <a href="#warehouse-runs">Plan runs →</a>`],['WIN','Metro on-time delivery is up 6 pts this month.']],'Ask: which orders are at risk today?')}
       <section class="card">${cardH('chart','Orders fulfilled','per day · last 14 days')}<div class="bignum num">${sum(ful)}<span> orders</span></div><div style="padding:6px 12px 14px">${barChart({values:ful,labels:fl,short:fl.map((l,i)=>i===13?'Today':l.split(' ')[0]),aria:'Orders fulfilled per day'})}</div></section>
       <section class="card">${cardH('pie','Delivery status','shipments · last 30 days')}<div class="card-b">${donut([{k:'Delivered / collected',n:st('delivered')+st('collected'),c:DONUT_STEPS[0]},{k:'In transit',n:st('transit'),c:DONUT_STEPS[1]},{k:'Awaiting dispatch',n:st('none')+st('label'),c:DONUT_STEPS[2]},{k:'Failed',n:st('failed'),c:DONUT_STEPS[3]}],Math.round((st('delivered')+st('collected'))/Math.max(1,recent.length)*100)+'%','delivered')}</div></section></div>
     <div class="grid g21"><section class="card">${cardH('trend','Order → fulfilment time','hours, daily average · target 24 h')}<div class="stats-row"><div>Average<b class="num">${avgT.toFixed(1)} h</b></div><div>Fastest<b class="num">${Math.min(...tt)} h</b></div><div>Slowest<b class="num">${Math.max(...tt)} h</b></div><div>Days over target<b class="num">${tt.filter(x=>x>24).length} / 30</b></div></div><div style="padding:6px 8px 10px">${areaChart({values:tt,labels:tl,fmt:x=>x+' h',axisFmt:x=>Math.round(x)+'h',target:24,targetLabel:'Target 24 h',aria:'Order to fulfilment time'})}</div></section>
@@ -1221,12 +1223,8 @@ function initWaves(){cancelAnimationFrame(waveRAF);const cvs=$$('canvas.wave');i
   const st=cvs.map(cv=>({cv,b:[]}));
   const size=()=>st.forEach(o=>{const r=o.cv.getBoundingClientRect();o.cv.width=r.width*dpr;o.cv.height=r.height*dpr;o.w=o.cv.width;o.h=o.cv.height;
     o.b=Array.from({length:16},(_,i)=>mk(o,true));});
-  const mk=(o,init)=>{const r=(4+Math.random()**2*24)*dpr;const b={x:o.w*(.05+Math.random()*.9),y:init?o.h*(.15+Math.random()*.6):o.h*.62+r,r,v:(.15+Math.random()*.35)*dpr,ph:Math.random()*6.28,a:0,y0:0};b.y0=b.y+(init?60*dpr:0);return b;};
-  const bubble=(c,b)=>{const g=c.createRadialGradient(b.x-b.r*.35,b.y-b.r*.35,b.r*.1,b.x,b.y,b.r);
-    g.addColorStop(0,`rgba(255,255,255,${.75*b.a})`);g.addColorStop(.6,`rgba(255,255,255,${.18*b.a})`);g.addColorStop(1,`rgba(158,247,245,${.35*b.a})`);
-    c.fillStyle=g;c.beginPath();c.arc(b.x,b.y,b.r,0,7);c.fill();
-    c.lineWidth=1.2*dpr;c.strokeStyle=`rgba(81,112,255,${.45*b.a})`;c.stroke();
-    c.fillStyle=`rgba(255,255,255,${.95*b.a})`;c.beginPath();c.ellipse(b.x-b.r*.38,b.y-b.r*.42,b.r*.22,b.r*.12,-.6,0,7);c.fill();};
+  const mk=(o,init)=>{const r=(4+Math.random()**2*24)*dpr;const b={x:o.w*(.05+Math.random()*.9),y:init?o.h*(.15+Math.random()*.6):o.h*.62+r,r,v:(.15+Math.random()*.35)*dpr,ph:Math.random()*6.28,a:0,y0:0,blue:Math.random()<.22};b.y0=b.y+(init?60*dpr:0);return b;};
+  const bubble=(c,b)=>{c.globalAlpha=b.a*(b.blue?.9:.95);c.fillStyle=b.blue?'#5170FF':'#FFFFFF';c.beginPath();c.arc(b.x,b.y,b.r,0,7);c.fill();c.globalAlpha=1;};
   size();
   const draw=()=>{st.forEach(o=>{const c=o.cv.getContext('2d');c.clearRect(0,0,o.w,o.h);
     const top=o.h*.07;
