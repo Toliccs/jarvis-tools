@@ -126,7 +126,7 @@ body.fblue .tq .card-h .ic,body.fblue .tq .mini{color:var(--ink)}
 body.fblue .tq .hbar{color:var(--ink)}
 body.fblue .tq .hbar .muted,body.fblue .tq .hbar .kv dt{color:var(--ink-3)}
 body.fblue .tq .hbar .kv dd{color:var(--ink)}
-body.fblue .kcol.today h3{color:#fff}
+
 body.fblue .ins,body.fblue .ai .ask,body.fblue .tq .pill,body.fblue .tq .kcard{color:var(--ink)}
 body.fblue .ai .badge.b-info{background:#fff}
 .fswitch{display:inline-flex;background:#2A2F2C;border-radius:999px;padding:2px;gap:2px}
@@ -1337,7 +1337,7 @@ function pCadence(tab){ensureExtra();
   if(tab==='planner'){
     return head+`<p class="muted" style="font-weight:650;margin:-6px 0 14px">Week of ${fdate(WEEK0.toISOString())}. Click a visit to log the outcome. Auto-plan fills gaps with overdue accounts.</p>
     <div class="kanban" style="grid-template-columns:repeat(5,minmax(0,1fr))">${DAYS.map((d,i)=>{const vs=vis.filter(v=>v.day===i).sort((a,b)=>a.time.localeCompare(b.time,undefined,{numeric:true}));
-      return `<div class="kcol ${i===TODAY_IDX?'today':''}" style="${i===TODAY_IDX?'background:var(--tq)':''}"><h3>${d} ${dayDate(i).getDate()}${i===TODAY_IDX?' <span class="badge b-lime">Today</span>':''}<span class="muted" style="font-weight:700;margin-left:auto">${vs.length}</span></h3>${vs.map(v=>{const c=cust(v.cust);return `<div class="kcard" data-act="visit-open" data-id="${v.id}" tabindex="0" style="cursor:pointer"><div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">${repAv(v.rep)}<span class="muted" style="font-weight:750;font-size:12px">${v.time}</span><span class="spacer"></span>${badge(v.status)}</div><b>${esc(c.name)}</b><div class="meta"><span>${esc(c.city)}</span>·<span>${weeksTxt(DB.cad[c.id].eff)}</span>${v.outcome?`·<span>${esc(v.outcome)}</span>`:''}</div></div>`;}).join('')||'<div class="muted" style="font-weight:600;padding:8px">No visits</div>'}</div>`;}).join('')}</div>`;
+      return `<div class="kcol ${i===TODAY_IDX?'today':''}"><h3>${d} ${dayDate(i).getDate()}${i===TODAY_IDX?' <span class="badge b-lime">Today</span>':''}<span class="muted" style="font-weight:700;margin-left:auto">${vs.length}</span></h3>${vs.map(v=>{const c=cust(v.cust);return `<div class="kcard" data-act="visit-open" data-id="${v.id}" tabindex="0" style="cursor:pointer"><div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">${repAv(v.rep)}<span class="muted" style="font-weight:750;font-size:12px">${v.time}</span><span class="spacer"></span>${badge(v.status)}</div><b>${esc(c.name)}</b><div class="meta"><span>${esc(c.city)}</span>·<span>${weeksTxt(DB.cad[c.id].eff)}</span>${v.outcome?`·<span>${esc(v.outcome)}</span>`:''}</div></div>`;}).join('')||'<div class="muted" style="font-weight:600;padding:8px">No visits</div>'}</div>`;}).join('')}</div>`;
   }
   if(tab==='missing'){
     return head+kpiStrip([{l:'Accounts missing an order',v:missing.length},{l:'Expected revenue at risk',v:kmoney(sum(missing,c=>DB.cad[c.id].avgOrder))},{l:'Calls logged today',v:DB.calls.length},{l:'Recovered (30 days)',v:'7',d:'+2'}])+
