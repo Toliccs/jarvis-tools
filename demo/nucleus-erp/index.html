@@ -107,27 +107,24 @@ h1 .badge{vertical-align:middle;margin-left:10px;font-size:13px}
 .g12{grid-template-columns:minmax(0,1fr) minmax(0,2fr)}
 .g4{grid-template-columns:repeat(4,minmax(0,1fr))}
 
-.card.tq{background:var(--tq)}
-.tq .hbar{background:#fff;border:0;border-radius:16px;padding:11px 14px;margin-bottom:8px;border:1px solid rgba(11,11,11,.06)}
-.tq .hbar:last-child{margin-bottom:0;border-bottom:1px solid rgba(11,11,11,.06)}
+.card.tq{background:linear-gradient(180deg,#7C9EEA 0%,#83A9E7 50%,#A0DEE0 100%);box-shadow:0 1px 2px rgba(20,60,45,.06),10px 14px 28px -14px rgba(24,72,56,.42),0 14px 30px -12px rgba(158,247,245,.75)}
+.tq .hbar{background:#fff;border:0;border-radius:16px;padding:11px 14px;margin-bottom:10px;box-shadow:0 8px 18px -8px rgba(28,48,130,.5)}
+.tq .hbar:last-child{margin-bottom:0}
 .tq .hbar{grid-template-columns:1fr auto;row-gap:9px}
-.tq .hbar .track{background:#E6EBFF;grid-column:1/-1;order:3}
-.tq .hbar .fill{background:var(--blue)}
+.tq .hbar .track{background:var(--blue);grid-column:1/-1;order:3}
+.tq .hbar .fill{background:var(--lime)}
+.tq .hbar .target{background:var(--ink)}
 .tq .card-h .ic,.tq .mini{background:#fff;border-color:transparent}
 .tq .toggle{border-color:rgba(11,11,11,.08)}
-.tq .progress{background:#fff}
-.tq .progress i{background:var(--blue)}
-.tq .kv dt,.tq .card-h small{color:#3F4743}
+.tq .progress{background:var(--blue)}
+.tq .progress i{background:var(--lime)}
+.tq .kv dt,.tq .card-h small,.tq .muted,.tq .bignum span{color:var(--ink-2)}
+.tq .hbar .muted,.tq .hbar .kv dt{color:var(--ink-3)}
 /* electric-blue feature-card variant (toggle in the top bar) */
 body.fblue{--tq:#4A63F0}
-body.fblue .card.tq,body.fblue .ai{color:#fff}
-body.fblue .tq .card-h h3,body.fblue .ai .card-h h3,body.fblue .tq .card-h small,body.fblue .tq>.card-b>p.muted,body.fblue .tq .muted,body.fblue .tq .kv dt,body.fblue .tq .kv dd,body.fblue .tq .bignum span{color:#fff}
-body.fblue .tq .card-h .ic,body.fblue .tq .mini{color:var(--ink)}
-body.fblue .tq .hbar{color:var(--ink)}
-body.fblue .tq .hbar .muted,body.fblue .tq .hbar .kv dt{color:var(--ink-3)}
-body.fblue .tq .hbar .kv dd{color:var(--ink)}
-
-body.fblue .ins,body.fblue .ai .ask,body.fblue .tq .pill,body.fblue .tq .kcard{color:var(--ink)}
+body.fblue .ai{color:#fff}
+body.fblue .ai .card-h h3{color:#fff}
+body.fblue .ins,body.fblue .ai .ask{color:var(--ink)}
 body.fblue .ai .badge.b-info{background:#fff}
 .fswitch{display:inline-flex;background:#2A2F2C;border-radius:999px;padding:2px;gap:2px}
 .fswitch button{border:0;background:none;color:#fff;border-radius:999px;padding:3px 10px;font-size:11.5px;font-weight:700}
@@ -358,7 +355,7 @@ details.dt summary{cursor:pointer;color:var(--ink-3);font-weight:700;font-size:1
 </style>
 </head>
 <body>
-<div class="preview"><b>DESIGN LAB</b> Clickable prototype of the Nucleus ERP in the new design. Sample data only, changes stay in this browser. <span class="fswitch" role="group" aria-label="Feature card colour"><button data-act="feature" data-f="tq"><i style="background:#BEFBE6"></i>Turquoise</button><button data-act="feature" data-f="blue"><i style="background:#5170FF"></i>Electric blue</button></span><button data-act="reset">Reset demo data</button></div>
+<div class="preview"><b>DESIGN LAB</b> Clickable prototype of the Nucleus ERP in the new design. Sample data only, changes stay in this browser. <span class="fswitch" role="group" aria-label="AI card colour"><span style="font-size:11px;font-weight:700;padding:0 6px 0 8px;align-self:center">AI cards</span><button data-act="feature" data-f="tq"><i style="background:#BEFBE6"></i>Turquoise</button><button data-act="feature" data-f="blue"><i style="background:#5170FF"></i>Electric blue</button></span><button data-act="reset">Reset demo data</button></div>
 
 <div class="app">
   <nav class="side" id="side" aria-label="Main"></nav>
@@ -1003,7 +1000,7 @@ function pWarehouse(tab){
       <section class="card">${cardH('chart','Orders fulfilled','per day · last 14 days')}<div class="bignum num">${sum(ful)}<span> orders</span></div><div style="padding:6px 12px 14px">${barChart({values:ful,labels:fl,short:fl.map((l,i)=>i===13?'Today':l.split(' ')[0]),aria:'Orders fulfilled per day'})}</div></section>
       <section class="card">${cardH('pie','Delivery status','shipments · last 30 days')}<div class="card-b">${donut([{k:'Delivered / collected',n:st('delivered')+st('collected'),c:DONUT_STEPS[0]},{k:'In transit',n:st('transit'),c:DONUT_STEPS[1]},{k:'Awaiting dispatch',n:st('none')+st('label'),c:DONUT_STEPS[2]},{k:'Failed',n:st('failed'),c:DONUT_STEPS[3]}],Math.round((st('delivered')+st('collected'))/Math.max(1,recent.length)*100)+'%','delivered')}</div></section></div>
     <div class="grid g21"><section class="card">${cardH('trend','Order → fulfilment time','hours, daily average · target 24 h')}<div class="stats-row"><div>Average<b class="num">${avgT.toFixed(1)} h</b></div><div>Fastest<b class="num">${Math.min(...tt)} h</b></div><div>Slowest<b class="num">${Math.max(...tt)} h</b></div><div>Days over target<b class="num">${tt.filter(x=>x>24).length} / 30</b></div></div><div style="padding:6px 8px 10px">${areaChart({values:tt,labels:tl,fmt:x=>x+' h',axisFmt:x=>Math.round(x)+'h',target:24,targetLabel:'Target 24 h',aria:'Order to fulfilment time'})}</div></section>
-      <section class="card tq">${cardH('clock','On-time by delivery method','% by promised date · red tick = 95% target')}<div class="card-b">${methods.map(([m,n,p])=>`<div class="hbar"><span>${esc(m)}<br><small class="muted" style="font-weight:600">${n} shipments</small></span><div class="track"><div class="fill" style="width:${p}%"></div><div class="target" style="left:95%"></div></div><span class="v num">${p}%${p<95?` <span class="badge b-crit" style="padding:1px 5px">${BI.bang}</span>`:''}</span></div>`).join('')}</div></section></div>`+
+      <section class="card tq">${cardH('clock','On-time by delivery method','% by promised date · black tick = 95% target')}<div class="card-b">${methods.map(([m,n,p])=>`<div class="hbar"><span>${esc(m)}<br><small class="muted" style="font-weight:600">${n} shipment${n===1?"":"s"}</small></span><div class="track"><div class="fill" style="width:${p}%"></div><div class="target" style="left:95%"></div></div><span class="v num">${p}%${p<95?` <span class="badge b-crit" style="padding:1px 5px">${BI.bang}</span>`:''}</span></div>`).join('')}</div></section></div>`+
     listCard({key:'deliveries',rows:()=>DB.orders.filter(o=>ago(o.date)<30),rowAct:'deldrawer',ph:'Search orders, customers, tracking #',text:o=>`${o.id} ${cust(o.cust).name} ${o.method} ${o.track}`,minw:1180,
       tabs:[['unf','Unfulfilled',o=>fulStatus(o)==='Unfulfilled'],['ready','Ready to ship',o=>['label'].includes(o.del)||o.status==='Packed'],['transit','In transit',o=>o.del==='transit'],['delivered','Delivered',o=>['delivered','collected'].includes(o.del)],['failed','Failed',o=>o.del==='failed']],
       rowCls:o=>fulStatus(o)==='Unfulfilled'?'attn':o.del==='failed'?'critrow':'',
@@ -1338,7 +1335,7 @@ function pCadence(tab){ensureExtra();
       ['WIN',`Visited accounts ordered ${Math.round(1.6*10)/10}× more often than unvisited ones in the last 90 days.`]],'Ask: who should Kyle see tomorrow?')}
       <section class="card">${cardH('chart','Visits completed','per week · last 10 weeks')}<div class="bignum num">${wk[9]}<span> this week</span></div><div style="padding:6px 12px 14px">${barChart({values:wk,labels:wl,short:wl.map((l,i)=>i===9?'This wk':l.replace('Wk of ','').split(' ')[0]),aria:'Visits per week'})}</div></section>
       <section class="card">${cardH('pie','Account cadence status',custs.length+' accounts')}<div class="card-b">${donut([{k:'On track',n:onT.length,c:DONUT_STEPS[0]},{k:'Due soon',n:soon.length,c:DONUT_STEPS[1]},{k:'Overdue',n:over.length,c:DONUT_STEPS[3]}],Math.round((onT.length+soon.length)/Math.max(1,custs.length)*100)+'%','compliant')}</div></section></div>
-    <div class="grid g12"><section class="card tq">${cardH('users','Compliance by rep','accounts visited on cadence')}<div class="card-b">${byRep.map(([r,p,n])=>`<div class="hbar"><span>${esc(r)}<br><small class="muted" style="font-weight:600">${n} accounts</small></span><div class="track"><div class="fill" style="width:${p}%"></div><div class="target" style="left:90%"></div></div><span class="v num">${p}%</span></div>`).join('')}<p class="muted" style="font-weight:600;font-size:12px;margin:10px 2px 0">Red tick = 90% target</p></div></section>
+    <div class="grid g12"><section class="card tq">${cardH('users','Compliance by rep','accounts visited on cadence')}<div class="card-b">${byRep.map(([r,p,n])=>`<div class="hbar"><span>${esc(r)}<br><small class="muted" style="font-weight:600">${n} accounts</small></span><div class="track"><div class="fill" style="width:${p}%"></div><div class="target" style="left:90%"></div></div><span class="v num">${p}%</span></div>`).join('')}<p class="muted" style="font-weight:600;font-size:12px;margin:10px 2px 0">Black tick = 90% target</p></div></section>
     <div>${listCard({key:'cadacc',rows:()=>DB.customers.filter(c=>!rep||c.rep===rep),href:c=>'#customer-'+c.id,ph:'Search account, rep',text:c=>`${c.name} ${c.rep} ${c.city}`,sort:4,dir:1,
       tabs:[['over','Overdue',c=>cadStatus(c.id)==='Overdue'],['soon','Due soon',c=>cadStatus(c.id)==='Due soon'],['ok','On track',c=>cadStatus(c.id)==='On track']],
       rowCls:c=>cadStatus(c.id)==='Overdue'?'critrow':cadStatus(c.id)==='Due soon'?'attn':'',minw:940,
@@ -1443,7 +1440,7 @@ const _reset=ACT.reset;ACT.reset=()=>{_reset();ensureExtra();rerender();};
 const _qc=ACT.qcmenu;ACT.qcmenu=()=>{_qc();$('#qcmenu').insertAdjacentHTML('beforeend',`<button data-act="new-campaign">${ic('mega')}Campaign</button>`);};
 
 function applyFeature(f){document.body.classList.toggle('fblue',f==='blue');$$('.fswitch button').forEach(b=>b.classList.toggle('on',b.dataset.f===f));try{localStorage.setItem('nucleusLab.feature',f);}catch(e){}}
-ACT.feature=el=>{applyFeature(el.dataset.f);initWaves();toast(el.dataset.f==='blue'?'Feature cards: electric blue':'Feature cards: turquoise');};
+ACT.feature=el=>{applyFeature(el.dataset.f);initWaves();toast(el.dataset.f==='blue'?'AI cards: electric blue':'AI cards: turquoise');};
 (()=>{let f='tq';try{f=localStorage.getItem('nucleusLab.feature')||'tq';}catch(e){}applyFeature(f);})();
 route();
 </script>
