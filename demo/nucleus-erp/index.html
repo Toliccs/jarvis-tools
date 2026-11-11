@@ -1235,52 +1235,30 @@ document.addEventListener('dragstart',e=>{const c=e.target.closest&&e.target.clo
 document.addEventListener('dragover',e=>{const col=e.target.closest&&e.target.closest('.kcol');if(col){e.preventDefault();$$('.kcol').forEach(k=>k.classList.toggle('over',k===col));}});
 document.addEventListener('drop',e=>{const col=e.target.closest&&e.target.closest('.kcol');if(!col)return;e.preventDefault();const t=DB.tasks.find(x=>x.id===e.dataTransfer.getData('text/plain'));if(t){t.status=col.dataset.col;save();rerender();toast('Moved to '+t.status);}});
 
-/* soap suds: smooth foam built from bubbles. Each turquoise bubble sits in an
-   electric-blue soapy halo, so the blue lace forms between bubbles and the foam
-   edge is naturally scalloped. Everything moves: the patch flows sideways in a
-   seamless loop, bubbles breathe and wobble, and loose bubbles float up into it. */
+/* futuristic dot-wave (the original AI-card animation), in electric-blue shades.
+   A flowing grid of fine dots that ripples continuously; it starts under the card
+   title and runs behind the top insight tiles. */
 let waveRAF;
 function initWaves(){cancelAnimationFrame(waveRAF);const cvs=$$('canvas.wave');if(!cvs.length)return;
-  const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches,dpr=devicePixelRatio||1,TAU=Math.PI*2;
+  const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches,dpr=devicePixelRatio||1;
   const st=cvs.map(cv=>({cv}));
-  const edgeY=(o,x)=>{const u=x/o.w,b=o.bot-o.top;return o.top+b*(.62+.14*Math.sin(u*TAU*2+.9)+.06*Math.sin(u*TAU*3+2.1));}; // periodic over o.w
-  const pack=o=>{let k=11;const rnd=()=>{k=(k*16807)%2147483647;return (k-1)/2147483646;};
-    const band=o.bot-o.top,maxR=Math.min(band*.2,26*dpr),gapp=1.4*dpr,W=o.w;o.b=[];
-    const fits=(x,y,r)=>{if(y+r>edgeY(o,x))return false;if(y<o.top-r*.4)return false;
-      for(const c of o.b){let dx=Math.abs(c.x-x);dx=Math.min(dx,W-dx);const dy=c.y-y,m=c.r+r+gapp;if(dx*dx+dy*dy<m*m)return false;}return true;};
-    for(let pass=0;pass<9;pass++){const target=maxR*Math.pow(.72,pass),tries=pass<3?300:700;
-      for(let i=0;i<tries;i++){const x=rnd()*W,y=o.top-band*.1+rnd()*band*1.05;const r=Math.max(2*dpr,target*(.8+rnd()*.4));
-        if(fits(x,y,r))o.b.push({x,y,r,ph:rnd()*TAU,sp:.6+rnd()*.9});}}
-    o.fl=[...Array(8)].map(()=>({x:rnd()*W,r:(1.8+rnd()*3.4)*dpr,ph:rnd()*TAU,sp:.5+rnd()*.8}));
-  };
   const size=()=>st.forEach(o=>{const r=o.cv.getBoundingClientRect(),card=o.cv.parentElement,hd=card.querySelector('.card-h'),ins=card.querySelector('.insights');
     o.cv.width=r.width*dpr;o.cv.height=r.height*dpr;o.w=o.cv.width;o.h=o.cv.height;
-    o.top=((hd?hd.getBoundingClientRect().bottom:r.top+60)-r.top+4)*dpr;
-    const ft=ins&&ins.firstElementChild;o.bot=((ft?ft.getBoundingClientRect().top:r.top+r.height*.5)-r.top-6)*dpr;
-    if(o.bot-o.top<50*dpr)o.bot=o.top+50*dpr;pack(o);});
+    const top=((hd?hd.getBoundingClientRect().bottom:r.top+60)-r.top)*dpr;
+    const ft=ins&&ins.firstElementChild;const tileTop=((ft?ft.getBoundingClientRect().top:r.top+r.height*.5)-r.top)*dpr;
+    o.top=top;o.fh=Math.min((tileTop-top)*1.9,o.h-top-60*dpr);});
   size();let t=0;
-  const bubble=(c,x,y,r)=>{
-    c.fillStyle='#9EF7F5';c.beginPath();c.arc(x,y,r,0,TAU);c.fill();
-    const lw=Math.max(1,r*.08);c.strokeStyle='#D2FFFC';c.lineWidth=lw;c.beginPath();c.arc(x,y,r-lw/2,0,TAU);c.stroke();
-    if(r>4*dpr){c.strokeStyle='rgba(56,190,205,.28)';c.lineWidth=Math.max(1,r*.06);c.beginPath();c.arc(x,y,r*.84,.1*Math.PI,.42*Math.PI);c.stroke();}
-    c.fillStyle='rgba(240,255,254,.95)';c.beginPath();c.ellipse(x-r*.4,y-r*.42,Math.max(.8*dpr,r*.2),Math.max(.6*dpr,r*.1),-.75,0,TAU);c.fill();};
-  const draw=()=>{const blue=document.body.classList.contains('fblue');const suds=blue?'#2F45CF':'#5170FF';
-    st.forEach(o=>{const c=o.cv.getContext('2d'),w=o.w,band=o.bot-o.top;c.clearRect(0,0,w,o.h);
-      const shift=(t*12*dpr)%w;
-      c.save();c.beginPath();c.rect(0,o.top,w,band);c.clip();
-      const pos=o.b.map(b=>{const r=b.r*(1+.06*Math.sin(t*1.3*b.sp+b.ph)),y=b.y+Math.sin(t*.9*b.sp+b.ph)*1.4*dpr,x=((b.x+shift+Math.cos(t*.7+b.ph)*1.4*dpr)%w+w)%w;return [x,y,r];});
-      const each=(fn)=>pos.forEach(([x,y,r])=>{fn(x,y,r);if(x-r*1.4<0)fn(x+w,y,r);if(x+r*1.4>w)fn(x-w,y,r);});
-      // electric-blue suds: soapy halos around every bubble, merged into one lacy mass
-      c.fillStyle=suds;each((x,y,r)=>{c.beginPath();c.arc(x,y,r*1.22+2.6*dpr,0,TAU);c.fill();});
-      // turquoise bubbles on top
-      each((x,y,r)=>bubble(c,x,y,r));
-      // loose bubbles floating up into the foam
-      for(const f of o.fl){const life=(t*.16*f.sp+f.ph/TAU)%1,x=((f.x+shift+Math.sin(t+f.ph)*5*dpr)%w+w)%w,base=edgeY(o,((x-shift)%w+w)%w);
-        const y=base+band*.32-life*band*.34,a=Math.sin(life*Math.PI);c.globalAlpha=a;bubble(c,x,y,f.r);c.globalAlpha=1;}
-      const fh=14*dpr,gr=c.createLinearGradient(0,o.top,0,o.top+fh);gr.addColorStop(0,'rgba(0,0,0,1)');gr.addColorStop(1,'rgba(0,0,0,0)');
-      c.globalCompositeOperation='destination-out';c.fillStyle=gr;c.fillRect(0,o.top,w,fh);c.globalCompositeOperation='source-over';
-      c.restore();});
-    t+=.016;if(!reduce)waveRAF=requestAnimationFrame(draw);};
+  const draw=()=>{const blue=document.body.classList.contains('fblue');
+    st.forEach(o=>{const c=o.cv.getContext('2d'),w=o.w,h=o.fh,top=o.top;c.clearRect(0,0,w,o.h);
+      const cols=70,rows=34;
+      for(let j=0;j<rows;j++)for(let i=0;i<cols;i++){const u=i/cols,v=j/rows;
+        const z=Math.sin(u*6+t)*.5+Math.cos(v*5-t*.8)*.5+Math.sin((u+v)*4+t*.6)*.4,k=(z+1.4)/2.8;
+        const x=w*(.06+u*.88)+Math.sin(v*3+t)*w*.03;
+        const y=top+h*(.1+v*.72)-z*h*.13+(u-.5)*(u-.5)*h*.5;
+        const rr=(.6+k*1.3)*dpr;
+        c.fillStyle=blue?`rgba(${Math.round(214-k*40)},${Math.round(226-k*30)},255,${.3+k*.6})`:`rgba(${Math.round(150-k*76)},${Math.round(170-k*71)},${Math.round(255-k*15)},${.28+k*.62})`;
+        c.beginPath();c.arc(x,y,rr,0,6.283);c.fill();}});
+    t+=.012;if(!reduce)waveRAF=requestAnimationFrame(draw);};
   draw();window.onresize=()=>{size();if(reduce)draw();};}
 
 /* =====================================================================
