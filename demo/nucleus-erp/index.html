@@ -118,6 +118,21 @@ h1 .badge{vertical-align:middle;margin-left:10px;font-size:13px}
 .tq .progress{background:#fff}
 .tq .progress i{background:var(--blue)}
 .tq .kv dt,.tq .card-h small{color:#3F4743}
+/* electric-blue feature-card variant (toggle in the top bar) */
+body.fblue{--tq:#4A63F0}
+body.fblue .card.tq,body.fblue .ai{color:#fff}
+body.fblue .tq .card-h h3,body.fblue .ai .card-h h3,body.fblue .tq .card-h small,body.fblue .tq>.card-b>p.muted,body.fblue .tq .muted,body.fblue .tq .kv dt,body.fblue .tq .kv dd,body.fblue .tq .bignum span{color:#fff}
+body.fblue .tq .card-h .ic,body.fblue .tq .mini{color:var(--ink)}
+body.fblue .tq .hbar{color:var(--ink)}
+body.fblue .tq .hbar .muted,body.fblue .tq .hbar .kv dt{color:var(--ink-3)}
+body.fblue .tq .hbar .kv dd{color:var(--ink)}
+body.fblue .kcol.today h3{color:#fff}
+body.fblue .ins,body.fblue .ai .ask,body.fblue .tq .pill,body.fblue .tq .kcard{color:var(--ink)}
+body.fblue .ai .badge.b-info{background:#fff}
+.fswitch{display:inline-flex;background:#2A2F2C;border-radius:999px;padding:2px;gap:2px}
+.fswitch button{border:0;background:none;color:#fff;border-radius:999px;padding:3px 10px;font-size:11.5px;font-weight:700}
+.fswitch button.on{background:#fff;color:var(--ink)}
+.fswitch i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;vertical-align:-1px}
 /* KPI strip */
 .kpis{display:grid;grid-template-columns:repeat(var(--n,5),minmax(0,1fr));margin-bottom:16px}
 .kpi{padding:18px 20px;border-left:1px solid var(--line);display:flex;flex-direction:column;gap:6px;min-width:0}
@@ -340,7 +355,7 @@ details.dt summary{cursor:pointer;color:var(--ink-3);font-weight:700;font-size:1
 </style>
 </head>
 <body>
-<div class="preview"><b>DESIGN LAB</b> Clickable prototype of the Nucleus ERP in the new design. Sample data only, changes stay in this browser. <button data-act="reset">Reset demo data</button></div>
+<div class="preview"><b>DESIGN LAB</b> Clickable prototype of the Nucleus ERP in the new design. Sample data only, changes stay in this browser. <span class="fswitch" role="group" aria-label="Feature card colour"><button data-act="feature" data-f="tq"><i style="background:#BEFBE6"></i>Turquoise</button><button data-act="feature" data-f="blue"><i style="background:#5170FF"></i>Electric blue</button></span><button data-act="reset">Reset demo data</button></div>
 
 <div class="app">
   <nav class="side" id="side" aria-label="Main"></nav>
@@ -1223,7 +1238,7 @@ function initWaves(){cancelAnimationFrame(waveRAF);const cvs=$$('canvas.wave');i
   const st=cvs.map(cv=>({cv,b:[]}));
   const size=()=>st.forEach(o=>{const r=o.cv.getBoundingClientRect();o.cv.width=r.width*dpr;o.cv.height=r.height*dpr;o.w=o.cv.width;o.h=o.cv.height;
     o.b=Array.from({length:24},(_,i)=>mk(o,true));});
-  const mk=(o,init)=>{const r=(2+Math.random()**2*9)*dpr;const b={x:o.w*(.05+Math.random()*.9),y:init?o.h*(.15+Math.random()*.6):o.h*.62+r,r,v:(.15+Math.random()*.35)*dpr,ph:Math.random()*6.28,a:0,y0:0,c:['#5170FF','#4A63F0','#3D55E0','#6E89FF','#8FA3FF','#AFC0FF'][Math.floor(Math.random()*6)]};b.y0=b.y+(init?60*dpr:0);return b;};
+  const mk=(o,init)=>{const r=(2+Math.random()**2*9)*dpr;const b={x:o.w*(.05+Math.random()*.9),y:init?o.h*(.15+Math.random()*.6):o.h*.62+r,r,v:(.15+Math.random()*.35)*dpr,ph:Math.random()*6.28,a:0,y0:0,c:(document.body.classList.contains('fblue')?['#8FA3FF','#AFC0FF','#C7D3FF','#9EF7F5','#7B95FF','#B6F3FF']:['#5170FF','#4A63F0','#3D55E0','#6E89FF','#8FA3FF','#AFC0FF'])[Math.floor(Math.random()*6)]};b.y0=b.y+(init?60*dpr:0);return b;};
   const bubble=(c,b)=>{c.globalAlpha=b.a*.9;c.fillStyle=b.c;c.beginPath();c.arc(b.x,b.y,b.r,0,7);c.fill();c.globalAlpha=1;};
   size();
   const draw=()=>{st.forEach(o=>{const c=o.cv.getContext('2d');c.clearRect(0,0,o.w,o.h);
@@ -1321,7 +1336,7 @@ function pCadence(tab){ensureExtra();
   if(tab==='planner'){
     return head+`<p class="muted" style="font-weight:650;margin:-6px 0 14px">Week of ${fdate(WEEK0.toISOString())}. Click a visit to log the outcome. Auto-plan fills gaps with overdue accounts.</p>
     <div class="kanban" style="grid-template-columns:repeat(5,minmax(0,1fr))">${DAYS.map((d,i)=>{const vs=vis.filter(v=>v.day===i).sort((a,b)=>a.time.localeCompare(b.time,undefined,{numeric:true}));
-      return `<div class="kcol ${i===TODAY_IDX?'':''}" style="${i===TODAY_IDX?'background:var(--tq)':''}"><h3>${d} ${dayDate(i).getDate()}${i===TODAY_IDX?' <span class="badge b-lime">Today</span>':''}<span class="muted" style="font-weight:700;margin-left:auto">${vs.length}</span></h3>${vs.map(v=>{const c=cust(v.cust);return `<div class="kcard" data-act="visit-open" data-id="${v.id}" tabindex="0" style="cursor:pointer"><div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">${repAv(v.rep)}<span class="muted" style="font-weight:750;font-size:12px">${v.time}</span><span class="spacer"></span>${badge(v.status)}</div><b>${esc(c.name)}</b><div class="meta"><span>${esc(c.city)}</span>·<span>${weeksTxt(DB.cad[c.id].eff)}</span>${v.outcome?`·<span>${esc(v.outcome)}</span>`:''}</div></div>`;}).join('')||'<div class="muted" style="font-weight:600;padding:8px">No visits</div>'}</div>`;}).join('')}</div>`;
+      return `<div class="kcol ${i===TODAY_IDX?'today':''}" style="${i===TODAY_IDX?'background:var(--tq)':''}"><h3>${d} ${dayDate(i).getDate()}${i===TODAY_IDX?' <span class="badge b-lime">Today</span>':''}<span class="muted" style="font-weight:700;margin-left:auto">${vs.length}</span></h3>${vs.map(v=>{const c=cust(v.cust);return `<div class="kcard" data-act="visit-open" data-id="${v.id}" tabindex="0" style="cursor:pointer"><div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">${repAv(v.rep)}<span class="muted" style="font-weight:750;font-size:12px">${v.time}</span><span class="spacer"></span>${badge(v.status)}</div><b>${esc(c.name)}</b><div class="meta"><span>${esc(c.city)}</span>·<span>${weeksTxt(DB.cad[c.id].eff)}</span>${v.outcome?`·<span>${esc(v.outcome)}</span>`:''}</div></div>`;}).join('')||'<div class="muted" style="font-weight:600;padding:8px">No visits</div>'}</div>`;}).join('')}</div>`;
   }
   if(tab==='missing'){
     return head+kpiStrip([{l:'Accounts missing an order',v:missing.length},{l:'Expected revenue at risk',v:kmoney(sum(missing,c=>DB.cad[c.id].avgOrder))},{l:'Calls logged today',v:DB.calls.length},{l:'Recovered (30 days)',v:'7',d:'+2'}])+
@@ -1415,6 +1430,9 @@ const _bulk=ACT.bulk;ACT.bulk=el=>{const a=CUR.bulk[+el.dataset.i][1];if(a==='ca
 const _reset=ACT.reset;ACT.reset=()=>{_reset();ensureExtra();rerender();};
 const _qc=ACT.qcmenu;ACT.qcmenu=()=>{_qc();$('#qcmenu').insertAdjacentHTML('beforeend',`<button data-act="new-campaign">${ic('mega')}Campaign</button>`);};
 
+function applyFeature(f){document.body.classList.toggle('fblue',f==='blue');$$('.fswitch button').forEach(b=>b.classList.toggle('on',b.dataset.f===f));try{localStorage.setItem('nucleusLab.feature',f);}catch(e){}}
+ACT.feature=el=>{applyFeature(el.dataset.f);initWaves();toast(el.dataset.f==='blue'?'Feature cards: electric blue':'Feature cards: turquoise');};
+(()=>{let f='tq';try{f=localStorage.getItem('nucleusLab.feature')||'tq';}catch(e){}applyFeature(f);})();
 route();
 </script>
 </body>
