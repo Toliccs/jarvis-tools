@@ -8,7 +8,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
 :root{
-  --sage:linear-gradient(45deg,#96C0B1 0%,#B1D5C4 35%,#C5E4D2 65%,#E0F8E5 100%);
+  --sage:linear-gradient(to top right,#6D9084 0%,#8CAA9D 25%,#ADC8BA 50%,#D2E7D9 75%,#E9FEEE 100%);
   --blue:#5170FF; --blue-strong:#4A63F0; --turq:#9EF7F5;
   --lime:#C6E852;
   --ink:#0B0B0B; --ink-2:#2E3430; --ink-3:#545B57;
@@ -23,7 +23,7 @@
 }
 *{box-sizing:border-box}
 html,body{margin:0;overflow-x:hidden}
-body{font-family:Manrope,system-ui,sans-serif;background:#B9D8C9;background-image:var(--sage);min-height:100vh;color:var(--ink);font-size:14px;-webkit-font-smoothing:antialiased}
+body{font-family:Manrope,system-ui,sans-serif;background:#ADC8BA;background-image:var(--sage);background-attachment:fixed;min-height:100vh;color:var(--ink);font-size:14px;-webkit-font-smoothing:antialiased}
 button,input,select,textarea{font:inherit;color:inherit}
 button{cursor:pointer}
 a{color:inherit}
@@ -145,7 +145,7 @@ body.fblue .ai .badge.b-info{background:#fff}
 @keyframes kGrow{from{width:0}}
 @media (prefers-reduced-motion:reduce){.gauge .g-fill,.gauge .g-needle,.kbar-t i{animation:none}}
 /* ===== Calm look: same palette, quieter — strong colour only on small, important things ===== */
-body.calm{--lime:#D2E77E;--blue-strong:#4B5FC8;--blue:#7486D4;--tq:#E6F3F0;background:#D3E5DC;background-image:linear-gradient(45deg,#C6DCD2 0%,#D3E5DC 40%,#DFEDE6 70%,#ECF6F0 100%)}
+body.calm{--lime:#D2E77E;--blue-strong:#4B5FC8;--blue:#7486D4;--tq:#E6F3F0;background:#ADC8BA;background-image:var(--sage)}
 body.calm .card.tq{background:linear-gradient(180deg,#E8EDFB 0%,#EAF2F6 55%,#E6F5F0 100%);box-shadow:var(--shadow)}
 body.calm .tq .hbar{box-shadow:0 4px 12px -6px rgba(40,60,110,.28)}
 body.calm .tq .hbar .track,body.calm .kbar-t,body.calm .tq .progress{background:#E8ECF2}
@@ -167,6 +167,10 @@ body.calm .ai{background:var(--tq)}
 body.calm.fblue{--tq:#E3E8F8}
 body.calm.fblue .ai,body.calm.fblue .ai .card-h h3{color:var(--ink)}
 body.calm .kcard.sel,body.calm .kcard.sel:hover{background:#E3F0B6;border-color:#CFE08A}
+/* text placed directly on the page background */
+.crumbs,.crumbs a{color:#14201B}
+.crumbs span:last-child{color:#0B0B0B}
+main>p.muted,#view>p.muted{color:#14201B}
 /* KPI strip */
 .kpis{display:grid;grid-template-columns:repeat(var(--n,5),minmax(0,1fr));margin-bottom:16px}
 .kpi{padding:18px 20px;border-left:1px solid var(--line);display:flex;flex-direction:column;gap:6px;min-width:0}
