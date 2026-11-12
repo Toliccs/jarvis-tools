@@ -107,7 +107,7 @@ h1 .badge{vertical-align:middle;margin-left:10px;font-size:13px}
 .g12{grid-template-columns:minmax(0,1fr) minmax(0,2fr)}
 .g4{grid-template-columns:repeat(4,minmax(0,1fr))}
 
-.card.tq{background:linear-gradient(180deg,#7C9EEA 0%,#83A9E7 50%,#A0DEE0 100%);box-shadow:0 1px 2px rgba(20,60,45,.06),10px 14px 28px -14px rgba(24,72,56,.42),0 14px 30px -12px rgba(158,247,245,.75)}
+.card.tq{background:var(--tq);box-shadow:var(--shadow)}
 .tq .hbar{background:#fff;border:0;border-radius:16px;padding:11px 14px;margin-bottom:10px;box-shadow:0 8px 18px -8px rgba(28,48,130,.5)}
 .tq .hbar:last-child{margin-bottom:0}
 .tq .hbar{grid-template-columns:1fr auto;row-gap:9px}
@@ -126,6 +126,9 @@ body.fblue .ai{color:#fff}
 body.fblue .ai .card-h h3{color:#fff}
 body.fblue .ins,body.fblue .ai .ask{color:var(--ink)}
 body.fblue .ai .badge.b-info{background:#fff}
+body.fblue:not(.calm) .card.tq{color:#fff}
+body.fblue:not(.calm) .tq .card-h h3,body.fblue:not(.calm) .tq .card-h small,body.fblue:not(.calm) .tq>.card-b>p.muted,body.fblue:not(.calm) .tq .bignum,body.fblue:not(.calm) .tq .bignum span,body.fblue:not(.calm) .tq>.card-b>.kv dt,body.fblue:not(.calm) .tq>.card-b>.kv dd{color:#fff}
+body.fblue:not(.calm) .tq .card-h .ic,body.fblue:not(.calm) .tq .mini,body.fblue:not(.calm) .tq .pill{color:var(--ink)}
 .fswitch{display:inline-flex;background:#2A2F2C;border-radius:999px;padding:2px;gap:2px}
 .fswitch button{border:0;background:none;color:#fff;border-radius:999px;padding:3px 10px;font-size:11.5px;font-weight:700}
 .fswitch button.on{background:#fff;color:var(--ink)}
@@ -146,7 +149,7 @@ body.fblue .ai .badge.b-info{background:#fff}
 @media (prefers-reduced-motion:reduce){.gauge .g-fill,.gauge .g-needle,.kbar-t i{animation:none}}
 /* ===== Calm look: same palette, quieter — strong colour only on small, important things ===== */
 body.calm{--lime:#D2E77E;--blue-strong:#4B5FC8;--blue:#7486D4;--tq:#E6F3F0;background:#ADC8BA;background-image:var(--sage)}
-body.calm .card.tq{background:linear-gradient(180deg,#E8EDFB 0%,#EAF2F6 55%,#E6F5F0 100%);box-shadow:var(--shadow)}
+body.calm .card.tq{background:var(--tq)}
 body.calm .tq .hbar{box-shadow:0 4px 12px -6px rgba(40,60,110,.28)}
 body.calm .tq .hbar .track,body.calm .kbar-t,body.calm .tq .progress{background:#E8ECF2}
 body.calm .tq .hbar .fill,body.calm .kbar-t i,body.calm .tq .progress i,body.calm .hbar .fill,body.calm .progress i{background:#6577C9}
