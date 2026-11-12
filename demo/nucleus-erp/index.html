@@ -144,6 +144,29 @@ body.fblue .ai .badge.b-info{background:#fff}
 .kbar small{display:block;margin-top:4px;font-size:11.5px;font-weight:650}
 @keyframes kGrow{from{width:0}}
 @media (prefers-reduced-motion:reduce){.gauge .g-fill,.gauge .g-needle,.kbar-t i{animation:none}}
+/* ===== Calm look: same palette, quieter — strong colour only on small, important things ===== */
+body.calm{--lime:#D2E77E;--blue-strong:#4B5FC8;--blue:#7486D4;--tq:#E6F3F0;background:#D3E5DC;background-image:linear-gradient(45deg,#C6DCD2 0%,#D3E5DC 40%,#DFEDE6 70%,#ECF6F0 100%)}
+body.calm .card.tq{background:linear-gradient(180deg,#E8EDFB 0%,#EAF2F6 55%,#E6F5F0 100%);box-shadow:var(--shadow)}
+body.calm .tq .hbar{box-shadow:0 4px 12px -6px rgba(40,60,110,.28)}
+body.calm .tq .hbar .track,body.calm .kbar-t,body.calm .tq .progress{background:#E8ECF2}
+body.calm .tq .hbar .fill,body.calm .kbar-t i,body.calm .tq .progress i,body.calm .hbar .fill,body.calm .progress i{background:#6577C9}
+body.calm .b-warn{background:#F5E6B5;color:#3D3100}
+body.calm .b-good{background:#E2F0E5;color:#1D5530}
+body.calm .b-crit{background:#F6E2DF;color:#842A20}
+body.calm .b-info{background:#E8ECFA;color:#33439A}
+body.calm .b-lime{background:#E3F0B6}
+body.calm .t tr.attn td:first-child{box-shadow:inset 3px 0 0 #D8B95A}
+body.calm .t tr.critrow td:first-child{box-shadow:inset 3px 0 0 #D08A82}
+body.calm .t tr.selrow td{background:#F1F3FB}
+body.calm .side a.on,body.calm .seg .on,body.calm .tab.on{background:#4B5FC8}
+body.calm .tab.on .n{color:#4B5FC8}
+body.calm .side a.sub.on{background:#EEF1FB;color:#33439A}
+body.calm .delta.up{background:#E7F2EA}
+body.calm .delta.down{background:#F7E7E4}
+body.calm .ai{background:var(--tq)}
+body.calm.fblue{--tq:#E3E8F8}
+body.calm.fblue .ai,body.calm.fblue .ai .card-h h3{color:var(--ink)}
+body.calm .kcard.sel,body.calm .kcard.sel:hover{background:#E3F0B6;border-color:#CFE08A}
 /* KPI strip */
 .kpis{display:grid;grid-template-columns:repeat(var(--n,5),minmax(0,1fr));margin-bottom:16px}
 .kpi{padding:18px 20px;border-left:1px solid var(--line);display:flex;flex-direction:column;gap:6px;min-width:0}
@@ -369,7 +392,7 @@ details.dt summary{cursor:pointer;color:var(--ink-3);font-weight:700;font-size:1
 </style>
 </head>
 <body>
-<div class="preview"><b>DESIGN LAB</b> Clickable prototype of the Nucleus ERP in the new design. Sample data only, changes stay in this browser. <span class="fswitch" role="group" aria-label="AI card colour"><span style="font-size:11px;font-weight:700;padding:0 6px 0 8px;align-self:center">AI cards</span><button data-act="feature" data-f="tq"><i style="background:#BEFBE6"></i>Turquoise</button><button data-act="feature" data-f="blue"><i style="background:#5170FF"></i>Electric blue</button></span><button data-act="reset">Reset demo data</button></div>
+<div class="preview"><b>DESIGN LAB</b> Clickable prototype of the Nucleus ERP in the new design. Sample data only, changes stay in this browser. <span class="fswitch" role="group" aria-label="Overall look"><span style="font-size:11px;font-weight:700;padding:0 6px 0 8px;align-self:center">Look</span><button data-act="look" data-l="vivid">Vivid</button><button data-act="look" data-l="calm">Calm</button></span><span class="fswitch" role="group" aria-label="AI card colour"><span style="font-size:11px;font-weight:700;padding:0 6px 0 8px;align-self:center">AI cards</span><button data-act="feature" data-f="tq"><i style="background:#BEFBE6"></i>Turquoise</button><button data-act="feature" data-f="blue"><i style="background:#5170FF"></i>Electric blue</button></span><button data-act="reset">Reset demo data</button></div>
 
 <div class="app">
   <nav class="side" id="side" aria-label="Main"></nav>
@@ -416,7 +439,10 @@ const rel=s=>{const d=D(s),n=ago(s),t=d.toLocaleTimeString('en-AU',{hour:'numeri
   if(n<=0)return 'Today at '+t; if(n===1)return 'Yesterday at '+t; if(n<7)return d.toLocaleDateString('en-AU',{weekday:'long'})+' at '+t; return fdate(s);};
 const uid=(()=>{let i=0;return p=>(p||'u')+(++i)})();
 const sum=(a,f=x=>x)=>a.reduce((s,x)=>s+f(x),0);
-const C={good:'#1F7A3A',warn:'#B7791F',crit:'#C2362B',blue:'#5170FF',blueTop:'#587CFE',turq:'#9EF7F5',lime:'#C6E852',grid:'#E8ECEA',axis:'#D3D9D5'};
+const PALETTES={
+  vivid:{blue:'#5170FF',blueTop:'#587CFE',turq:'#9EF7F5',g1:'#9EF7F5',g2:'#5170FF',g3:'#2F45CF',n1:'#6E89FF',n2:'#4A63F0',donut:['#5170FF','#73A6F9','#9EF7F5','#C2362B']},
+  calm:{blue:'#7486D4',blueTop:'#8597DD',turq:'#D3EEEA',g1:'#CFEAE6',g2:'#8C9DDC',g3:'#5D6EB8',n1:'#8C9DDC',n2:'#5D6EB8',donut:['#6F82CF','#A3B3E6','#C6E3DE','#C2685E']}};
+const C={good:'#1F7A3A',warn:'#B7791F',crit:'#C2362B',blue:'#5170FF',blueTop:'#587CFE',turq:'#9EF7F5',lime:'#C6E852',grid:'#E8ECEA',axis:'#D3D9D5',g1:'#9EF7F5',g2:'#5170FF',g3:'#2F45CF',n1:'#6E89FF',n2:'#4A63F0'};
 
 /* ---------------- icons ---------------- */
 const P={
@@ -1260,17 +1286,17 @@ function initWaves(){cancelAnimationFrame(waveRAF);const cvs=$$('canvas.wave');i
     const ft=ins&&ins.firstElementChild;const tileTop=((ft?ft.getBoundingClientRect().top:r.top+r.height*.5)-r.top)*dpr;
     o.top=top;o.fh=Math.min((tileTop-top)*1.9,o.h-top-60*dpr);});
   size();let t=0;
-  const draw=()=>{const blue=document.body.classList.contains('fblue');
+  const draw=()=>{const blue=document.body.classList.contains('fblue'),calm=document.body.classList.contains('calm');
     st.forEach(o=>{const c=o.cv.getContext('2d'),w=o.w,h=o.fh,top=o.top;c.clearRect(0,0,w,o.h);
       const cols=70,rows=34;
       for(let j=0;j<rows;j++)for(let i=0;i<cols;i++){const u=i/cols,v=j/rows;
         const z=Math.sin(u*6+t)*.5+Math.cos(v*5-t*.8)*.5+Math.sin((u+v)*4+t*.6)*.4,k=(z+1.4)/2.8;
         const x=w*(.06+u*.88)+Math.sin(v*3+t)*w*.03;
-        const y=top+h*(.1+v*.72)-z*h*.13+(u-.5)*(u-.5)*h*.5;
+        const y=top+h*(.1+v*.72)-z*h*.13+(u-.5)*(u-.5)*h*.5;if(y<top+4*dpr)continue;
         const rr=(.6+k*1.3)*dpr;
-        c.fillStyle=blue?`rgba(${Math.round(214-k*40)},${Math.round(226-k*30)},255,${.3+k*.6})`:`rgba(${Math.round(150-k*76)},${Math.round(170-k*71)},${Math.round(255-k*15)},${.28+k*.62})`;
+        c.fillStyle=calm?`rgba(${Math.round(160-k*50)},${Math.round(175-k*45)},${Math.round(232-k*20)},${.18+k*.42})`:blue?`rgba(${Math.round(214-k*40)},${Math.round(226-k*30)},255,${.3+k*.6})`:`rgba(${Math.round(150-k*76)},${Math.round(170-k*71)},${Math.round(255-k*15)},${.28+k*.62})`;
         c.beginPath();c.arc(x,y,rr,0,6.283);c.fill();}});
-    t+=.012;if(!reduce)waveRAF=requestAnimationFrame(draw);};
+    t+=document.body.classList.contains('calm')?.005:.012;if(!reduce)waveRAF=requestAnimationFrame(draw);};
   draw();window.onresize=()=>{size();if(reduce)draw();};}
 
 /* =====================================================================
@@ -1322,10 +1348,10 @@ function ensureExtra(){
 }
 const REP_KPI={'Kyle Mason':{visits:6,revenue:8000},'James Okoro':{visits:8,revenue:10000},'Priya Shah':{visits:4,revenue:4000},'Sarah Lin':{visits:4,revenue:4000}};
 function gauge(pct,target){const id=uid('gg'),p=Math.max(0,Math.min(100,pct)),a=p*1.8,ta=Math.PI*(1-target/100),tx=100+Math.cos(ta)*78,ty=100-Math.sin(ta)*78,tx2=100+Math.cos(ta)*100,ty2=100-Math.sin(ta)*100;
-  return `<svg class="gauge" viewBox="0 0 200 112" role="img" aria-label="Compliance ${p}%, target ${target}%"><defs><linearGradient id="${id}" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#9EF7F5"/><stop offset=".55" stop-color="#5170FF"/><stop offset="1" stop-color="#2F45CF"/></linearGradient></defs>
+  return `<svg class="gauge" viewBox="0 0 200 112" role="img" aria-label="Compliance ${p}%, target ${target}%"><defs><linearGradient id="${id}" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="${C.g1}"/><stop offset=".55" stop-color="${C.g2}"/><stop offset="1" stop-color="${C.g3}"/></linearGradient></defs>
     <path d="M22 100A78 78 0 0 1 178 100" fill="none" stroke="#E9EEFF" stroke-width="20" stroke-linecap="round"/>
     <path class="g-fill" d="M22 100A78 78 0 0 1 178 100" fill="none" stroke="url(#${id})" stroke-width="20" stroke-linecap="round" pathLength="100" stroke-dasharray="${p} 100" style="--p:${p}"/>
-    <g class="g-needle" style="--a:${a}deg"><defs><linearGradient id="${id}n" gradientUnits="userSpaceOnUse" x1="98" y1="100" x2="36" y2="100"><stop offset="0" stop-color="#6E89FF"/><stop offset="1" stop-color="#4A63F0"/></linearGradient></defs><path d="M30 100L100 94.5A5.5 5.5 0 0 1 100 105.5Z" fill="url(#${id}n)"/></g></svg>`;}
+    <g class="g-needle" style="--a:${a}deg"><defs><linearGradient id="${id}n" gradientUnits="userSpaceOnUse" x1="98" y1="100" x2="36" y2="100"><stop offset="0" stop-color="${C.n1}"/><stop offset="1" stop-color="${C.n2}"/></linearGradient></defs><path d="M30 100L100 94.5A5.5 5.5 0 0 1 100 105.5Z" fill="url(#${id}n)"/></g></svg>`;}
 function kpiBar(label,val,target,f){const pct=Math.min(100,val/Math.max(1,target)*100),hit=val>=target;
   return `<div class="kbar" data-tip="${esc(label)} · <b>${esc(f(val))}</b> of ${esc(f(target))} target"><div class="kbar-h"><span>${esc(label)}</span><b class="num">${esc(f(val))} <span class="muted" style="font-weight:650">/ ${esc(f(target))}</span></b></div><div class="kbar-t" role="img" aria-label="${esc(label)}: ${esc(f(val))} of ${esc(f(target))}"><i style="width:${pct}%"></i></div><small class="muted">${hit?'Target reached':esc(f(target-val))+' to go'}</small></div>`;}
 function cadDue(cid){const cd=DB.cad[cid];return Math.round((D(cd.lastVisit).getTime()+cd.eff*7*864e5-TODAY.getTime())/864e5);}
@@ -1473,9 +1499,13 @@ ACT.share=()=>{const url=SHARE_URL+(location.hash||'');
   const show=()=>{$('#modal').innerHTML=`<header><h2>Share this prototype</h2><span class="spacer"></span><button class="mini" data-act="close" aria-label="Close">✕</button></header><div class="mb"><p style="margin:0 0 12px;font-weight:600">Anyone with this link can open the prototype, with no login needed. It uses sample data only.</p><div class="field"><label for="shareurl">Public link</label><input id="shareurl" readonly value="${esc(url)}"></div></div><footer><button class="pill" data-act="close">Close</button><button class="pill lime" data-act="share-copy">Copy link</button></footer>`;openLayer('modal');setTimeout(()=>{const i=$('#shareurl');i.focus();i.select();},60);};
   try{navigator.clipboard.writeText(url).then(()=>{toast('Public link copied. Paste it to Nick.');},show);}catch(e){show();}};
 ACT['share-copy']=()=>{const i=$('#shareurl');i.select();try{navigator.clipboard.writeText(i.value).then(()=>{closeLayers();toast('Public link copied');},()=>toast('Select the link and copy it (Ctrl+C / Cmd+C)'));}catch(e){toast('Select the link and copy it (Ctrl+C / Cmd+C)');}};
+function applyLook(l){const calm=l!=='vivid';document.body.classList.toggle('calm',calm);const P=PALETTES[calm?'calm':'vivid'];
+  ['blue','blueTop','turq','g1','g2','g3','n1','n2'].forEach(k=>C[k]=P[k]);DONUT_STEPS.splice(0,4,...P.donut);
+  $$('[data-act=look]').forEach(b=>b.classList.toggle('on',b.dataset.l===(calm?'calm':'vivid')));try{localStorage.setItem('nucleusLab.look',calm?'calm':'vivid');}catch(e){}}
+ACT.look=el=>{applyLook(el.dataset.l);route();toast(el.dataset.l==='calm'?'Calm look':'Vivid look');};
 function applyFeature(f){document.body.classList.toggle('fblue',f==='blue');$$('.fswitch button').forEach(b=>b.classList.toggle('on',b.dataset.f===f));try{localStorage.setItem('nucleusLab.feature',f);}catch(e){}}
 ACT.feature=el=>{applyFeature(el.dataset.f);initWaves();toast(el.dataset.f==='blue'?'AI cards: electric blue':'AI cards: turquoise');};
-(()=>{let f='tq';try{f=localStorage.getItem('nucleusLab.feature')||'tq';}catch(e){}applyFeature(f);})();
+(()=>{let f='tq',l='calm';try{f=localStorage.getItem('nucleusLab.feature')||'tq';l=localStorage.getItem('nucleusLab.look')||'calm';}catch(e){}applyFeature(f);applyLook(l);})();
 route();
 </script>
 </body>
